@@ -14,7 +14,19 @@ const device = useDeviceStore()
       IMEI: {{ device.deviceInfo.imei }}
     </NText>
     <NText v-if="device.deviceInfo.fwVersion">
-      FW: {{ device.deviceInfo.fwVersion }}
+      APP: {{ device.deviceInfo.fwVersion }}
+    </NText>
+    <NText v-if="device.deviceInfo.fwDate">
+      日期: {{ device.deviceInfo.fwDate }}
+    </NText>
+    <NText v-if="device.deviceInfo.fwBranch">
+      分支: {{ device.deviceInfo.fwBranch }}
+    </NText>
+    <NText v-if="device.deviceInfo.btVersion">
+      BT: {{ device.deviceInfo.btVersion }}
+    </NText>
+    <NText v-if="device.deviceInfo.btMac">
+      MAC: {{ device.deviceInfo.btMac }}
     </NText>
     <NText v-if="!device.connected" depth="3">
       请连接设备

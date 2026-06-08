@@ -1,7 +1,9 @@
 use crate::at_protocol::{
     get_at_command, get_timeout_ms, judge_test, parse_cap_response, parse_kv_response,
 };
+use crate::report;
 use crate::serial_manager::SharedSerialManager;
+use crate::settings;
 use crate::types::*;
 use std::collections::HashMap;
 use tauri::{AppHandle, State};
@@ -32,10 +34,13 @@ pub fn connect(
             format!("串口已打开但设备未响应 AT+CAP? ({})", e)
         })?;
 
-    parse_cap_response(&resp).map_err(|e| {
+    let cap = parse_cap_response(&resp).map_err(|e| {
         mgr.disconnect();
         format!("设备响应格式异常: {}", e)
-    })
+    })?;
+
+    mgr.start_monitor();
+    Ok(cap)
 }
 
 #[tauri::command]
@@ -107,6 +112,12 @@ pub fn run_single_test(
     serial: State<SharedSerialManager>,
     test_id: String,
 ) -> Result<TestResult, String> {
+    let app_settings = settings::load_settings();
+    let item_config = app_settings.test_items.iter().find(|i| i.id == test_id);
+    let params = item_config.map(|c| &c.params).cloned().unwrap_or_default();
+    let timeout = item_config.map(|c| c.timeout_ms).unwrap_or_else(|| get_timeout_ms(&test_id));
+    let retries = item_config.map(|c| c.retries).unwrap_or(1);
+
     let cmd = if test_id == "MCUTIME" {
         let now = chrono::Local::now();
         format!("AT+MCUTIME=\"{}\"", now.format("%Y-%m-%d %H:%M:%S"))
@@ -118,32 +129,49 @@ pub fn run_single_test(
         static_cmd.to_string()
     };
 
-    let timeout = get_timeout_ms(&test_id);
-    let mut mgr = serial.lock().unwrap();
+    let mut last_result = None;
+    let attempts = 1 + retries;
 
-    let start = std::time::Instant::now();
-    let resp = mgr.send_command(&cmd, timeout).map_err(|e| e.to_string())?;
-    let duration = start.elapsed().as_millis() as u64;
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
 
-    let (status, error) = judge_test(&test_id, &resp);
-    let parsed_data = resp
-        .lines
-        .first()
-        .map(|l| parse_kv_response(l))
-        .unwrap_or_default();
+        let mut mgr = serial.lock().unwrap();
+        let start = std::time::Instant::now();
+        let resp = mgr.send_command(&cmd, timeout).map_err(|e| e.to_string())?;
+        let duration = start.elapsed().as_millis() as u64;
 
-    Ok(TestResult {
-        id: test_id,
-        status,
-        raw_response: resp.lines.join("\n"),
-        parsed_data,
-        error,
-        duration_ms: duration,
-    })
+        let (status, error) = judge_test(&test_id, &resp, &params);
+        let parsed_data = resp
+            .lines
+            .first()
+            .map(|l| parse_kv_response(l))
+            .unwrap_or_default();
+
+        let result = TestResult {
+            id: test_id.clone(),
+            command: cmd.clone(),
+            status: status.clone(),
+            raw_response: resp.lines.join("\n"),
+            parsed_data,
+            error,
+            duration_ms: duration,
+        };
+
+        if status == "pass" || status == "manual_pending" {
+            return Ok(result);
+        }
+        last_result = Some(result);
+    }
+
+    Ok(last_result.unwrap())
 }
 
 #[tauri::command]
 pub fn run_auto_test(serial: State<SharedSerialManager>) -> Result<Vec<TestResult>, String> {
+    let app_settings = settings::load_settings();
+
     // 1. 进入产测模式 AT+PROD=1
     {
         let mut mgr = serial.lock().unwrap();
@@ -158,58 +186,93 @@ pub fn run_auto_test(serial: State<SharedSerialManager>) -> Result<Vec<TestResul
         }
     }
 
-    // 2. 执行测试序列
-    let test_ids = vec![
+    // 2. 执行已启用的自动测试项
+    let auto_test_ids: Vec<&str> = vec![
         "MDSIM", "MDREG", "MDSIG", "MDDATA", "MDALL", "MCUBVER", "MCUMAC", "MCUCHG", "MCUVBAT",
+        "MCUGAUGE", "MCUTIME",
     ];
 
     let mut results = Vec::new();
 
-    for test_id in test_ids {
-        let cmd = get_at_command(test_id);
+    for test_id in auto_test_ids {
+        let item_config = app_settings.test_items.iter().find(|i| i.id == test_id);
+        if let Some(cfg) = item_config {
+            if !cfg.enabled {
+                continue;
+            }
+        }
+
+        let params = item_config.map(|c| c.params.clone()).unwrap_or_default();
+        let timeout = item_config.map(|c| c.timeout_ms).unwrap_or_else(|| get_timeout_ms(test_id));
+        let retries = item_config.map(|c| c.retries).unwrap_or(1);
+
+        let cmd = if test_id == "MCUTIME" {
+            let now = chrono::Local::now();
+            format!("AT+MCUTIME=\"{}\"", now.format("%Y-%m-%d %H:%M:%S"))
+        } else {
+            get_at_command(test_id).to_string()
+        };
         if cmd.is_empty() {
             continue;
         }
 
-        let timeout = get_timeout_ms(test_id);
-        let mut mgr = serial.lock().unwrap();
+        let attempts = 1 + retries;
+        let mut last_result = None;
 
-        let start = std::time::Instant::now();
-        match mgr.send_command(cmd, timeout) {
-            Ok(resp) => {
-                let duration = start.elapsed().as_millis() as u64;
-                let (status, error) = judge_test(test_id, &resp);
-                let parsed_data = resp
-                    .lines
-                    .first()
-                    .map(|l| parse_kv_response(l))
-                    .unwrap_or_default();
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
 
-                results.push(TestResult {
-                    id: test_id.to_string(),
-                    status,
-                    raw_response: resp.lines.join("\n"),
-                    parsed_data,
-                    error,
-                    duration_ms: duration,
-                });
+            let mut mgr = serial.lock().unwrap();
+            let start = std::time::Instant::now();
+            match mgr.send_command(&cmd, timeout) {
+                Ok(resp) => {
+                    let duration = start.elapsed().as_millis() as u64;
+                    let (status, error) = judge_test(test_id, &resp, &params);
+                    let parsed_data = resp
+                        .lines
+                        .first()
+                        .map(|l| parse_kv_response(l))
+                        .unwrap_or_default();
+
+                    let result = TestResult {
+                        id: test_id.to_string(),
+                        command: cmd.clone(),
+                        status: status.clone(),
+                        raw_response: resp.lines.join("\n"),
+                        parsed_data,
+                        error,
+                        duration_ms: duration,
+                    };
+
+                    if status == "pass" {
+                        last_result = Some(result);
+                        break;
+                    }
+                    last_result = Some(result);
+                }
+                Err(e) => {
+                    last_result = Some(TestResult {
+                        id: test_id.to_string(),
+                        command: cmd.clone(),
+                        status: "fail".to_string(),
+                        raw_response: String::new(),
+                        parsed_data: HashMap::new(),
+                        error: e.to_string(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    });
+                }
             }
-            Err(e) => {
-                results.push(TestResult {
-                    id: test_id.to_string(),
-                    status: "fail".to_string(),
-                    raw_response: String::new(),
-                    parsed_data: HashMap::new(),
-                    error: e.to_string(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                });
-            }
+            drop(mgr);
         }
 
-        drop(mgr);
+        if let Some(r) = last_result {
+            results.push(r);
+        }
     }
 
-    // 3. 退出产测模式 AT+PROD=0 (无论测试是否全部成功都要退出)
+    // 3. 退出产测模式 AT+PROD=0
     {
         let mut mgr = serial.lock().unwrap();
         let _ = mgr.send_command("AT+PROD=0", get_timeout_ms("PROD"));
@@ -364,4 +427,114 @@ pub fn config_clear(serial: State<SharedSerialManager>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// --- Report commands ---
+
+#[tauri::command]
+pub fn cmd_save_report(report_data: TestReport) -> Result<String, String> {
+    report::save_report(&report_data)
+}
+
+#[tauri::command]
+pub fn cmd_list_reports(filter: ReportFilter) -> Result<Vec<ReportSummary>, String> {
+    report::list_reports(&filter)
+}
+
+#[tauri::command]
+pub fn cmd_get_report(report_id: String) -> Result<TestReport, String> {
+    report::get_report(&report_id)
+}
+
+#[tauri::command]
+pub fn cmd_delete_report(report_id: String) -> Result<(), String> {
+    report::delete_report(&report_id)
+}
+
+#[tauri::command]
+pub fn cmd_export_csv(filter: ReportFilter) -> Result<String, String> {
+    report::export_csv(&filter)
+}
+
+// --- Settings commands ---
+
+#[tauri::command]
+pub fn cmd_load_settings() -> AppSettings {
+    settings::load_settings()
+}
+
+#[tauri::command]
+pub fn cmd_save_settings(settings_data: AppSettings) -> Result<(), String> {
+    settings::save_settings(&settings_data)
+}
+
+#[tauri::command]
+pub fn cmd_get_data_dir() -> String {
+    report::get_data_dir()
+}
+
+#[tauri::command]
+pub fn cmd_get_default_test_items() -> Vec<TestItemConfig> {
+    default_test_items()
+}
+
+// --- Template commands ---
+
+#[tauri::command]
+pub fn cmd_list_templates() -> Result<Vec<ConfigTemplate>, String> {
+    settings::list_templates()
+}
+
+#[tauri::command]
+pub fn cmd_save_template(template: ConfigTemplate) -> Result<(), String> {
+    settings::save_template(&template)
+}
+
+#[tauri::command]
+pub fn cmd_delete_template(name: String) -> Result<(), String> {
+    settings::delete_template(&name)
+}
+
+// --- Device info command ---
+
+#[tauri::command]
+pub fn query_device_info(
+    serial: State<SharedSerialManager>,
+) -> Result<HashMap<String, String>, String> {
+    let mut mgr = serial.lock().unwrap();
+    let resp = mgr
+        .send_command("AT+MDINFO?", get_timeout_ms("MDINFO"))
+        .map_err(|e| e.to_string())?;
+
+    if !resp.success {
+        return Err("查询设备信息失败".to_string());
+    }
+
+    let mut data = HashMap::new();
+    for line in &resp.lines {
+        let parsed = parse_kv_response(line);
+        data.extend(parsed);
+    }
+
+    Ok(data)
+}
+
+#[tauri::command]
+pub fn query_version(serial: State<SharedSerialManager>) -> Result<HashMap<String, String>, String> {
+    let mut mgr = serial.lock().unwrap();
+    let resp = mgr
+        .send_command("AT+VER?", get_timeout_ms("VER"))
+        .map_err(|e| e.to_string())?;
+
+    if !resp.success {
+        return Err("查询版本失败".to_string());
+    }
+
+    let mut data = HashMap::new();
+    for line in &resp.lines {
+        let parsed = parse_kv_response(line);
+        data.extend(parsed);
+    }
+
+    Ok(data)
 }

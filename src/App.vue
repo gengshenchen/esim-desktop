@@ -1,7 +1,12 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import { NConfigProvider, NLayout, NLayoutHeader, NLayoutContent, NLayoutFooter, NMessageProvider, NDialogProvider } from 'naive-ui'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppFooter from '@/components/layout/AppFooter.vue'
+
+onMounted(() => {
+  document.addEventListener('contextmenu', (e) => e.preventDefault())
+})
 </script>
 
 <template>
@@ -13,11 +18,11 @@ import AppFooter from '@/components/layout/AppFooter.vue'
             <AppHeader />
           </NLayoutHeader>
           <NLayoutContent
-            content-style="padding: 16px;"
+            content-style="padding: 16px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column;"
             style="top: 56px; bottom: 32px;"
             position="absolute"
           >
-            <router-view />
+            <router-view style="flex: 1; min-height: 0;" />
           </NLayoutContent>
           <NLayoutFooter
             bordered
@@ -36,5 +41,15 @@ import AppFooter from '@/components/layout/AppFooter.vue'
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+body * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input, textarea, [contenteditable], .log-selectable, .log-selectable * {
+  -webkit-user-select: text;
+  user-select: text;
 }
 </style>

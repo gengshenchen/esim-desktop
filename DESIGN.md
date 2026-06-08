@@ -270,41 +270,48 @@ WAIT_RESPONSE
 
 ### 6.2 产测页面
 
+所有测试项（自动/手动/半自动）统一使用单个 **[测试]** 按钮，按 `judgeType` 分派不同行为：
+
+- **auto**：直接执行 AT 命令并自动判定（MCURST 需二次确认弹窗）
+- **manual**：点击后弹出手动测试弹框，自动发送启动命令，操作员判定后发送停止命令
+- **semi_auto**：点击后弹出按键测试弹框
+
 ```
 ┌─ 操作栏 ───────────────────────────────────────────────────┐
-│  [▶ 一键产测]  [停止]        进度: 8/14  通过: 7  失败: 1   │
+│  [▶ 一键产测]  [停止]  [重置]   通过: 7  失败: 1  总计: 14  │
+│                                               [日志/关闭日志]│
 └────────────────────────────────────────────────────────────┘
 
-┌─ 模组域测试 ────────────────────────────────────────────────┐
-│  失败时排查方向: SIM / 网络 / 协议栈 / 配置解析              │
-│                                                              │
-│  #  测试项        结果                   耗时    状态        │
-│  1  SIM 状态      READY                  120ms   ✓ PASS     │
-│  2  网络注册      CREG=1,CGREG=1,RAT=LTE 85ms   ✓ PASS     │
-│  3  信号质量      CSQ=18,RSRP=-92        90ms    ✓ PASS     │
-│  4  数据业务      UP,IP=10.21.33.8       110ms   ✓ PASS     │
-│  5  综合测试      SIM=OK,REG=OK,...      2.5s    ✓ PASS     │
-└──────────────────────────────────────────────────────────────┘
-
-┌─ MCU 域测试 ────────────────────────────────────────────────┐
-│  失败时排查方向: MCU 固件 / Main UART 链路                    │
-│                                                              │
-│  #  测试项        结果                   耗时    状态        │
-│  6  蓝牙版本      VER=1.0.3              80ms    ✓ PASS     │
-│  7  蓝牙 MAC      AA:BB:CC:DD:EE:FF      85ms    ✓ PASS     │
-│  8  充电信息      ON=1,ST=CHG,FULL=0     90ms    ✓ PASS     │
-│  9  电池电压      3850 mV                75ms    ✓ PASS     │
-│  10 LED 测试      [开始][停止]           —       ○ 待人工    │
-│  11 FB麦回环      [开始][停止]           —       ○ 待人工    │
-│  12 主麦回环      [开始][停止]           —       ○ 待人工    │
-│  13 按键测试      [开始] 进度: 2/4       —       ◐ 测试中   │
-│  14 电量计校准    —                      —       ○ 待执行    │
+┌─ 统一测试表格 ──────────────────────────────────────────────┐
+│  #  域    测试项      结果                 耗时   状态  操作  │
+│  1  模组  SIM 状态    READY                120ms  PASS [测试] │
+│  2  模组  网络注册    CREG=1,CGREG=1       85ms   PASS [测试] │
+│  3  模组  信号质量    CSQ=18,RSRP=-92      90ms   PASS [测试] │
+│  ...                                                         │
+│  10 MCU   LED 测试    —                    —      待执行[测试]│
+│  11 MCU   FB麦回环    —                    —      待执行[测试]│
+│  12 MCU   主麦回环    —                    —      待执行[测试]│
+│  13 MCU   按键测试    —                    —      待执行[测试]│
+│  ...                                                         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**人工判定项**：LED/麦克风回环执行后弹出确认框 `[PASS] [FAIL]`，由操作员目视/听觉判定。
+**手动测试弹框**（LED / FB麦回环 / 主麦回环）：
 
-**按键测试**：
+```
+┌─ LED 测试 ────────────────────────────────┐
+│                                            │
+│     请观察设备 LED 是否正常亮起             │
+│                                            │
+│         [  PASS  ]    [  FAIL  ]           │
+│                                            │
+│                 [取消]                      │
+└────────────────────────────────────────────┘
+```
+
+弹框打开时自动发送启动命令（如 `AT+MCULED=1`），点击 PASS/FAIL 时自动发送停止命令（如 `AT+MCULED=0`）。取消则恢复待执行状态。
+
+**按键测试弹框**：
 
 ```
 ┌─ 按键测试 ─────────────────────────────────┐
@@ -315,13 +322,27 @@ WAIT_RESPONSE
 │   └─────┘  └─────┘  └─────┘  └────────┘   │
 │                                             │
 │   ● 已检测(绿)  ○ 未检测(灰)               │
-│   进度: 2/4    超时倒计时: 25s              │
+│   进度: 2/4                                 │
 │                                             │
-│   [跳过]  [手动PASS]  [FAIL]                │
+│         [  PASS  ]    [  FAIL  ]            │
+│                  [停止]                      │
 └─────────────────────────────────────────────┘
 ```
 
-异步事件 `+MCUKEY:KEY=PTT,STATE=PRESS` 到达时对应按键变绿。全部检测完自动 PASS。超时未全部完成则 FAIL。
+异步事件 `+MCUKEY:KEY=PTT,STATE=PRESS` 到达时对应按键变绿。全部检测完自动 PASS。超时未全部完成则 FAIL。操作员也可随时手动判定 PASS/FAIL。
+
+**三态日志面板**：
+
+日志面板默认关闭，有三种状态：
+- **关闭**（默认）：不显示日志区域
+- **展开**：显示完整日志滚动区域（180px 高度）
+- **折叠**：仅显示最新一条日志的单行预览
+
+日志内容包含 TX/RX 详情（发送指令和接收响应），支持文本选择和复制。一键产测不会自动打开日志。
+
+**测试数据持久化**：
+
+产测页面的测试结果数据保存在 Pinia store 中，切换到其他页面再返回时数据不会丢失。仅在设置页面修改了配置（`configDirty` 标志）后，回到产测页面才会重新加载配置并清空数据。
 
 ### 6.3 配置页面
 
@@ -416,13 +437,37 @@ WAIT_RESPONSE
 
 ### 6.6 设置页面
 
-- 串口参数（波特率、默认端口）
-- 超时参数（每条命令独立配置）
-- 判定标准（信号阈值、电池电压范围）
-- 产品 Profile 管理
-- 按键测试按键列表配置
-- 模板管理
-- 操作员信息
+设置修改后自动保存（500ms 防抖），无需手动点击保存按钮。
+
+**基础设置**：
+- 操作员姓名
+- 串口波特率
+- 数据目录
+
+**测试项配置**（per-item）：
+
+每个测试项可独立配置：
+
+| 配置项 | 说明 |
+|--------|------|
+| 启用/禁用 | 控制该项是否出现在产测页面 |
+| 重试次数 | 失败后额外重试次数（0=只执行1次，1=最多2次） |
+| 超时(ms) | 单次执行超时时间 |
+
+部分测试项有额外参数：
+
+| 测试项 | 参数 | 说明 |
+|--------|------|------|
+| MDSIG (信号质量) | csq_min, rssi_min, rsrp_min | CSQ 0-31 阈值、RSSI dBm 阈值、RSRP 阈值 |
+| MDALL (综合测试) | ping_enabled, ping_host, ping_count | 是否测试 Ping、Ping 地址、次数 |
+| MCUVBAT (电池电压) | mv_min, mv_max | 电压合格范围 (mV) |
+| MCUKEY (按键测试) | keys, timeout_s | 待测按键列表、超时秒数 |
+
+可通过"恢复默认"将所有测试项配置重置为系统默认值。
+
+**配置与产测联动**：
+
+设置修改后通过 `configDirty` 标志通知产测页面。切换到产测页面时检查该标志，若配置已变更则重新加载配置并清空上次测试数据，确保配置立即生效（如关闭 Ping 后产测不再测试 Ping）。
 
 ---
 
@@ -433,14 +478,13 @@ WAIT_RESPONSE
 ```
 src-tauri/src/
 ├── main.rs              # Tauri 应用入口
-├── commands.rs          # Tauri IPC 命令注册
-├── serial_manager.rs    # 串口管理（扫描/连接/读写）
-├── at_protocol.rs       # AT 协议引擎（发送/解析/超时）
-├── test_runner.rs       # 产测执行器（自动化流程）
-├── config_service.rs    # 配置管理（上传/回读/对比）
-├── report.rs            # 报告生成与存储
-├── error.rs             # 统一错误类型
-└── types.rs             # 共享数据结构
+├── lib.rs               # 模块声明和 Tauri 命令注册
+├── commands.rs          # Tauri IPC 命令实现
+├── serial_manager.rs    # 串口管理（扫描/连接/读写/事件监听）
+├── at_protocol.rs       # AT 协议引擎（命令映射/解析/判定）
+├── report.rs            # 报告 JSON 读写与 CSV 导出
+├── settings.rs          # 设置与模板持久化
+└── types.rs             # 共享数据结构（含 default_test_items）
 ```
 
 ### 7.2 核心数据结构
@@ -454,12 +498,6 @@ struct DeviceCapability {
     mcu: bool,             // MCU=1
 }
 
-// AT 命令
-struct ATCommand {
-    raw: String,           // "AT+MDSIM?\r\n"
-    timeout_ms: u64,       // 2000
-}
-
 // AT 响应
 struct ATResponse {
     lines: Vec<String>,    // ["+MDSIM:READY"]
@@ -467,46 +505,52 @@ struct ATResponse {
     error_code: Option<String>,  // "TO", "MODE", etc.
 }
 
-// 产测模式状态
-enum ProductionState {
-    Idle,
-    Production,
-}
-
-// 测试项状态
-enum TestStatus {
-    Pending,
-    Running,
-    Pass,
-    Fail { error: String },
-    Skipped,
-    ManualPending,  // 等待人工判定
-}
-
 // 单项测试结果
 struct TestResult {
     id: String,
-    name: String,
-    domain: TestDomain,    // Modem / MCU
-    status: TestStatus,
+    command: String,       // 实际发送的 AT 命令（用于日志）
+    status: String,        // "pass" / "fail" / "manual_pending"
     raw_response: String,
     parsed_data: HashMap<String, String>,
+    error: String,
     duration_ms: u64,
-    timestamp: String,
+}
+
+// 测试项配置（per-item）
+struct TestItemConfig {
+    id: String,
+    enabled: bool,
+    retries: u32,          // 额外重试次数（0=1次, 1=最多2次）
+    timeout_ms: u64,
+    params: HashMap<String, serde_json::Value>,
+}
+
+// 应用设置
+struct AppSettings {
+    operator: String,
+    baud_rate: u32,
+    data_dir: String,
+    test_items: Vec<TestItemConfig>,
 }
 
 // 测试报告
 struct TestReport {
     id: String,
-    imei: String,
+    timestamp: String,
+    operator: String,
+    device: DeviceReportInfo,
+    overall: String,       // "PASS" / "FAIL"
+    duration_ms: u64,
+    items: Vec<TestReportItem>,
+}
+
+struct DeviceReportInfo {
     product: String,
+    imei: String,
+    iccid: String,
     fw_version: String,
     bt_version: String,
     bt_mac: String,
-    operator: String,
-    timestamp: String,
-    overall: OverallResult,  // Pass / Fail
-    items: Vec<TestResult>,
 }
 ```
 
@@ -514,10 +558,9 @@ struct TestReport {
 
 ```rust
 // 串口管理
-#[tauri::command] fn scan_ports() -> Vec<PortInfo>;
+#[tauri::command] fn scan_ports() -> Vec<String>;
 #[tauri::command] fn connect(port: String) -> Result<DeviceCapability>;
 #[tauri::command] fn disconnect() -> Result<()>;
-#[tauri::command] fn get_connection_state() -> ConnectionState;
 
 // AT 命令（底层）
 #[tauri::command] fn send_at_command(cmd: String, timeout_ms: u64) -> Result<ATResponse>;
@@ -525,12 +568,12 @@ struct TestReport {
 // 产测控制
 #[tauri::command] fn enter_production_mode() -> Result<ATResponse>;
 #[tauri::command] fn exit_production_mode() -> Result<ATResponse>;
-#[tauri::command] fn get_production_state() -> ProductionState;
 
-// 产测执行
+// 产测执行（读取 AppSettings 获取 per-item config）
 #[tauri::command] fn run_single_test(test_id: String) -> Result<TestResult>;
-#[tauri::command] fn run_auto_test(items: Vec<String>) -> Result<Vec<TestResult>>;
+#[tauri::command] fn run_auto_test() -> Result<Vec<TestResult>>;
 #[tauri::command] fn manual_judge(test_id: String, pass: bool) -> Result<()>;
+#[tauri::command] fn query_device_info() -> Result<HashMap<String, String>>;
 
 // 配置管理
 #[tauri::command] fn config_read() -> Result<Vec<String>>;
@@ -539,13 +582,23 @@ struct TestReport {
 #[tauri::command] fn config_restore_default() -> Result<()>;
 #[tauri::command] fn config_clear() -> Result<()>;
 
-// MCU 透传
-#[tauri::command] fn mcu_raw_command(cmd: String) -> Result<ATResponse>;
-
 // 报告
-#[tauri::command] fn save_report(report: TestReport) -> Result<String>;
-#[tauri::command] fn list_reports(filter: ReportFilter) -> Result<Vec<ReportSummary>>;
-#[tauri::command] fn export_reports(ids: Vec<String>, format: ExportFormat) -> Result<String>;
+#[tauri::command] fn cmd_save_report(report_data: TestReport) -> Result<String>;
+#[tauri::command] fn cmd_list_reports(filter: ReportFilter) -> Result<Vec<ReportSummary>>;
+#[tauri::command] fn cmd_get_report(report_id: String) -> Result<TestReport>;
+#[tauri::command] fn cmd_delete_report(report_id: String) -> Result<()>;
+#[tauri::command] fn cmd_export_csv(filter: ReportFilter) -> Result<String>;
+
+// 设置
+#[tauri::command] fn cmd_load_settings() -> AppSettings;
+#[tauri::command] fn cmd_save_settings(settings_data: AppSettings) -> Result<()>;
+#[tauri::command] fn cmd_get_default_test_items() -> Vec<TestItemConfig>;
+#[tauri::command] fn cmd_get_data_dir() -> String;
+
+// 模板
+#[tauri::command] fn cmd_list_templates() -> Result<Vec<ConfigTemplate>>;
+#[tauri::command] fn cmd_save_template(template: ConfigTemplate) -> Result<()>;
+#[tauri::command] fn cmd_delete_template(name: String) -> Result<()>;
 ```
 
 ### 7.4 异步事件推送
@@ -567,45 +620,58 @@ Rust 后端通过 Tauri Event 向前端推送：
 ### 8.1 一键自动产测
 
 ```
-1. 检查连接状态
-2. AT+PROD=1 → 进入产测模式
+1. 加载最新测试项配置（从设置读取 enabled/retries/timeout/params）
+2. AT+PROD=1 → 进入产测模式（最多重试 3 次）
 3. AT+MDINFO? → 获取 IMEI/ICCID/FW 等信息（作为报告标识）
-4. 模组域自动测试:
-   a. AT+MDSIM? → 判定: READY
-   b. AT+MDREG? → 判定: CREG=1 且 CGREG=1
-   c. AT+MDSIG? → 判定: CSQ>=10 且 RSRP>=-110
-   d. AT+MDDATA? → 判定: STATE=UP 且 IP 非空
-   e. AT+MDALL? → 判定: 所有子项 =OK
-5. MCU 域自动测试:
-   a. AT+MCUBVER? → 判定: 返回非空版本号
-   b. AT+MCUMAC? → 判定: MAC 格式合法 (XX:XX:XX:XX:XX:XX)
-   c. AT+MCUCHG? → 判定: 返回成功
-   d. AT+MCUVBAT? → 判定: 3000 <= MV <= 4300
-6. MCU 域人工测试（按产品 Profile 决定是否包含）:
-   a. AT+MCULED=1 → 操作员目视确认 → [PASS/FAIL]
-   b. AT+MCUFBMIC=1 → 操作员听觉确认 → [PASS/FAIL]
-   c. AT+MCUPMIC=1 → 操作员听觉确认 → [PASS/FAIL]
-   d. AT+MCUKEY → 等待全部按键上报 → 自动/超时判定
-7. MCU 域收尾测试:
-   a. AT+MCUGAUGE → 电量计校准
-   b. AT+MCUTIME="<当前时间>" → 时间同步
-8. AT+PROD=0 → 退出产测模式
-9. 汇总结果 → 生成报告 → 保存
+4. 按顺序执行所有已启用的自动测试项（judgeType=auto，MCURST 除外）:
+   每项按配置的 retries 重试（retries=0 执行 1 次, retries=1 最多 2 次），
+   使用配置的 timeout_ms 和 params 进行判定。
+   失败不跳过后续项，继续执行。
+5. AT+PROD=0 → 退出产测模式
+6. 执行 MCURST（恢复出厂）— 放在退出产测模式之后
+7. 汇总自动测试结果
+8. 若有手动/半自动测试项未完成，提示等待
+9. 全部已启用项完成后自动保存报告
 ```
 
-### 8.2 判定标准（可配置）
+**报告自动保存**：当所有已启用测试项均达到最终状态（pass/fail/skipped）时自动触发报告保存，覆盖"自动测试完成但手动测试未做"的场景 — 手动项完成后也会触发保存。
+
+### 8.2 判定标准（per-item 可配置）
+
+每个测试项的判定参数通过设置页面独立配置，存储在 `AppSettings.test_items[].params` 中。
+
+```rust
+struct TestItemConfig {
+    id: String,
+    enabled: bool,
+    retries: u32,       // 额外重试次数（0=1次, 1=2次）
+    timeout_ms: u64,
+    params: HashMap<String, serde_json::Value>,
+}
+```
+
+**信号质量判定（MDSIG）— 双尺度 CSQ**：
+
+设备返回的 CSQ 值有两种尺度：
+- **0-31 尺度**（正值）：对比 `csq_min`（默认 10）
+- **dBm 尺度**（负值，如 -63）：对比 `rssi_min`（默认 -90）
+
+```rust
+let csq_ok = if csq >= 0 { csq >= csq_min } else { csq >= rssi_min };
+```
+
+**综合测试判定（MDALL）**：
+
+当 `ping_enabled=false` 时，跳过 PING 和 DNS 子项判定。
+
+**各项默认参数**：
 
 ```json
 {
-  "sim": { "expected": "READY" },
-  "reg": { "creg": 1, "cgreg": 1 },
-  "signal": { "csq_min": 10, "rsrp_min": -110 },
-  "battery": { "mv_min": 3000, "mv_max": 4300 },
-  "mac": { "regex": "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$" },
-  "key_test": {
-    "keys": ["PTT", "VOL+", "VOL-", "POWER"],
-    "timeout_s": 30
-  }
+  "MDSIG": { "csq_min": 10, "rssi_min": -90, "rsrp_min": -110 },
+  "MDALL": { "ping_enabled": true, "ping_host": "8.8.8.8", "ping_count": 3 },
+  "MCUVBAT": { "mv_min": 3000, "mv_max": 4500 },
+  "MCUKEY": { "keys": ["PTT", "VOL+", "VOL-", "POWER"], "timeout_s": 30 }
 }
 ```
 
@@ -786,54 +852,33 @@ desktop/
 │   ├── tauri.conf.json          # Tauri 配置
 │   ├── icons/                   # 应用图标
 │   └── src/
-│       ├── main.rs
-│       ├── lib.rs
-│       ├── commands.rs          # IPC 命令注册
+│       ├── main.rs              # Tauri 入口
+│       ├── lib.rs               # 模块声明 + 命令注册
+│       ├── commands.rs          # IPC 命令实现
 │       ├── serial_manager.rs    # 串口管理
 │       ├── at_protocol.rs       # AT 协议引擎
-│       ├── test_runner.rs       # 产测执行器
-│       ├── config_service.rs    # 配置管理
-│       ├── report.rs            # 报告生成
-│       ├── error.rs             # 错误类型
+│       ├── report.rs            # 报告读写与 CSV 导出
+│       ├── settings.rs          # 设置与模板持久化
 │       └── types.rs             # 共享数据结构
 └── src/                         # Vue 前端
     ├── main.ts                  # 入口
-    ├── App.vue                  # 根组件
+    ├── App.vue                  # 根组件（右键菜单禁用、全局样式）
     ├── router/
-    │   └── index.ts             # 路由
+    │   └── index.ts             # 路由（5 个页面）
     ├── views/
-    │   ├── ProductionView.vue   # 产测页面
+    │   ├── ProductionView.vue   # 产测页面（统一表格 + 弹框）
     │   ├── ConfigView.vue       # 配置页面
     │   ├── DebugView.vue        # 调试页面
     │   ├── ReportView.vue       # 报告页面
-    │   └── SettingsView.vue     # 设置页面
+    │   └── SettingsView.vue     # 设置页面（per-item 配置 + 自动保存）
     ├── components/
-    │   ├── layout/
-    │   │   ├── AppHeader.vue    # 顶部栏（连接状态）
-    │   │   └── AppFooter.vue    # 底部栏（设备信息）
-    │   ├── production/
-    │   │   ├── TestItemCard.vue # 单项测试卡片
-    │   │   ├── KeyTestPanel.vue # 按键测试面板
-    │   │   └── ManualJudge.vue  # 人工判定弹窗
-    │   ├── config/
-    │   │   ├── ConfigEditor.vue # 配置编辑器
-    │   │   ├── ConfigDiff.vue   # 对比视图
-    │   │   └── TemplateSelector.vue
-    │   └── debug/
-    │       └── TerminalLog.vue  # 终端日志
-    ├── stores/                  # Pinia 状态管理
-    │   ├── device.ts            # 设备连接状态
-    │   ├── production.ts        # 产测状态
-    │   ├── config.ts            # 配置状态
-    │   └── report.ts            # 报告数据
-    ├── lib/
-    │   ├── tauri-serial.ts      # Tauri IPC 封装
-    │   ├── at-parser.ts         # AT 响应解析
-    │   ├── error-codes.ts       # 错误码映射
-    │   └── validators.ts        # 判定标准
-    └── assets/
-        └── styles/
-            └── main.css
+    │   └── layout/
+    │       ├── AppHeader.vue    # 顶部栏（连接状态）
+    │       └── AppFooter.vue    # 底部栏（设备信息）
+    └── stores/                  # Pinia 状态管理
+        ├── device.ts            # 设备连接状态
+        ├── production.ts        # 产测状态（测试项 + 日志 + configDirty）
+        └── report.ts            # 报告数据
 ```
 
 ---

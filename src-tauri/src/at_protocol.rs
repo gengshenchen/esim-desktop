@@ -102,7 +102,11 @@ pub fn get_at_command(test_id: &str) -> &'static str {
     }
 }
 
-pub fn judge_test(test_id: &str, resp: &ATResponse) -> (String, String) {
+pub fn judge_test(
+    test_id: &str,
+    resp: &ATResponse,
+    params: &HashMap<String, serde_json::Value>,
+) -> (String, String) {
     if !resp.success {
         let err = resp.error_code.clone().unwrap_or_else(|| "UNKNOWN".to_string());
         return ("fail".to_string(), err);
@@ -134,12 +138,26 @@ pub fn judge_test(test_id: &str, resp: &ATResponse) -> (String, String) {
             let data = resp.lines.first().map(|l| parse_kv_response(l)).unwrap_or_default();
             let csq: i32 = data.get("CSQ").and_then(|v| v.parse().ok()).unwrap_or(-999);
             let rsrp: i32 = data.get("RSRP").and_then(|v| v.parse().ok()).unwrap_or(-999);
-            let csq_ok = if csq >= 0 { csq >= 10 } else { csq >= -100 };
-            let rsrp_ok = rsrp >= -110;
+            let csq_min = params.get("csq_min").and_then(|v| v.as_i64()).unwrap_or(10) as i32;
+            let rssi_min = params.get("rssi_min").and_then(|v| v.as_i64()).unwrap_or(-90) as i32;
+            let rsrp_min = params.get("rsrp_min").and_then(|v| v.as_i64()).unwrap_or(-110) as i32;
+            let csq_ok = if csq >= 0 { csq >= csq_min } else { csq >= rssi_min };
+            let rsrp_ok = rsrp >= rsrp_min;
             if csq_ok && rsrp_ok {
                 ("pass".to_string(), String::new())
             } else {
-                ("fail".to_string(), format!("CSQ={},RSRP={}", csq, rsrp))
+                let mut reasons = Vec::new();
+                if !csq_ok {
+                    if csq >= 0 {
+                        reasons.push(format!("CSQ={}(需≥{})", csq, csq_min));
+                    } else {
+                        reasons.push(format!("CSQ={}dBm(需≥{})", csq, rssi_min));
+                    }
+                }
+                if !rsrp_ok {
+                    reasons.push(format!("RSRP={}(需≥{})", rsrp, rsrp_min));
+                }
+                ("fail".to_string(), reasons.join(","))
             }
         }
         "MDDATA" => {
@@ -154,13 +172,24 @@ pub fn judge_test(test_id: &str, resp: &ATResponse) -> (String, String) {
         }
         "MDALL" => {
             let data = resp.lines.first().map(|l| parse_kv_response(l)).unwrap_or_default();
-            let all_ok = data.values().all(|v| v == "OK");
+            let ping_enabled = params.get("ping_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let all_ok = data.iter().all(|(k, v)| {
+                if !ping_enabled && (k == "PING" || k == "DNS") {
+                    return true;
+                }
+                v == "OK"
+            });
             if all_ok {
                 ("pass".to_string(), String::new())
             } else {
                 let failures: Vec<String> = data
                     .iter()
-                    .filter(|(_, v)| v.as_str() != "OK")
+                    .filter(|(k, v)| {
+                        if !ping_enabled && (k.as_str() == "PING" || k.as_str() == "DNS") {
+                            return false;
+                        }
+                        v.as_str() != "OK"
+                    })
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect();
                 ("fail".to_string(), failures.join(","))
@@ -169,10 +198,12 @@ pub fn judge_test(test_id: &str, resp: &ATResponse) -> (String, String) {
         "MCUVBAT" => {
             let data = resp.lines.first().map(|l| parse_kv_response(l)).unwrap_or_default();
             let mv: i32 = data.get("MV").and_then(|v| v.parse().ok()).unwrap_or(0);
-            if mv >= 3000 && mv <= 4500 {
+            let mv_min = params.get("mv_min").and_then(|v| v.as_i64()).unwrap_or(3000) as i32;
+            let mv_max = params.get("mv_max").and_then(|v| v.as_i64()).unwrap_or(4500) as i32;
+            if mv >= mv_min && mv <= mv_max {
                 ("pass".to_string(), String::new())
             } else {
-                ("fail".to_string(), format!("MV={} (范围3000-4500)", mv))
+                ("fail".to_string(), format!("MV={} (范围{}-{})", mv, mv_min, mv_max))
             }
         }
         "MCUMAC" => {

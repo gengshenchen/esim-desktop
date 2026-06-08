@@ -2,6 +2,7 @@ use crate::error::AppError;
 use crate::types::{ATResponse, SerialDataEvent};
 use serialport::SerialPort;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -21,6 +22,8 @@ fn emit_event(handle: &Option<AppHandle>, line: &str, direction: &str) {
 pub struct SerialManager {
     port: Option<Box<dyn SerialPort>>,
     app_handle: Option<AppHandle>,
+    connected_port: Option<String>,
+    monitor_running: Arc<AtomicBool>,
 }
 
 impl SerialManager {
@@ -28,6 +31,8 @@ impl SerialManager {
         Self {
             port: None,
             app_handle: None,
+            connected_port: None,
+            monitor_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -58,15 +63,36 @@ impl SerialManager {
             .open()?;
 
         self.port = Some(port);
+        self.connected_port = Some(port_name.to_string());
         Ok(())
     }
 
     pub fn disconnect(&mut self) {
+        self.monitor_running.store(false, Ordering::Relaxed);
         self.port = None;
+        self.connected_port = None;
     }
 
     pub fn is_connected(&self) -> bool {
         self.port.is_some()
+    }
+
+    pub fn connected_port_name(&self) -> Option<String> {
+        self.connected_port.clone()
+    }
+
+    pub fn monitor_flag(&self) -> Arc<AtomicBool> {
+        self.monitor_running.clone()
+    }
+
+    pub fn start_monitor(&mut self) {
+        self.monitor_running.store(true, Ordering::Relaxed);
+    }
+
+    pub fn force_disconnect(&mut self) {
+        self.port = None;
+        self.connected_port = None;
+        self.monitor_running.store(false, Ordering::Relaxed);
     }
 
     pub fn send_command(
@@ -181,4 +207,43 @@ pub type SharedSerialManager = Arc<Mutex<SerialManager>>;
 
 pub fn create_serial_manager() -> SharedSerialManager {
     Arc::new(Mutex::new(SerialManager::new()))
+}
+
+pub fn start_port_monitor(serial: SharedSerialManager, app_handle: AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+
+            let (port_name, monitor_active) = {
+                let mgr = serial.lock().unwrap();
+                let name = mgr.connected_port_name();
+                let active = mgr.monitor_flag().load(Ordering::Relaxed);
+                (name, active)
+            };
+
+            if !monitor_active {
+                continue;
+            }
+
+            let port_name = match port_name {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let ports = match serialport::available_ports() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let still_exists = ports.iter().any(|p| p.port_name == port_name);
+
+            if !still_exists {
+                {
+                    let mut mgr = serial.lock().unwrap();
+                    mgr.force_disconnect();
+                }
+                let _ = app_handle.emit("serial:disconnected", ());
+            }
+        }
+    });
 }

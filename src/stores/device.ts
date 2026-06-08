@@ -14,6 +14,8 @@ export interface DeviceInfo {
   imei: string
   iccid: string
   fwVersion: string
+  fwDate: string
+  fwBranch: string
   btVersion: string
   btMac: string
 }
@@ -30,6 +32,8 @@ export const useDeviceStore = defineStore('device', () => {
     imei: '',
     iccid: '',
     fwVersion: '',
+    fwDate: '',
+    fwBranch: '',
     btVersion: '',
     btMac: '',
   })
@@ -54,12 +58,26 @@ export const useDeviceStore = defineStore('device', () => {
       productionMode.value = 'idle'
 
       try {
+        const ver = await invoke<Record<string, string>>('query_version')
+        deviceInfo.fwVersion = ver.APP || ver.app || ''
+        deviceInfo.fwDate = ver.DATE || ver.date || ''
+        deviceInfo.fwBranch = ver.BRANCH || ver.branch || ''
+      } catch {
+        // version query optional
+      }
+
+      try {
         unlistenDisconnect = (await listen('serial:disconnected', () => {
           handleDisconnect()
         })) as unknown as () => void
       } catch (e) {
         console.warn('event listen not available:', e)
       }
+
+      import('./production').then(({ useProductionStore }) => {
+        const production = useProductionStore()
+        production.loadTestItemConfigs()
+      }).catch(() => {})
     } catch (e) {
       console.error('connect failed:', e)
       throw e
@@ -79,11 +97,21 @@ export const useDeviceStore = defineStore('device', () => {
     connected.value = false
     capability.value = null
     productionMode.value = 'idle'
-    Object.assign(deviceInfo, { imei: '', iccid: '', fwVersion: '', btVersion: '', btMac: '' })
+    selectedPort.value = null
+    Object.assign(deviceInfo, { imei: '', iccid: '', fwVersion: '', fwDate: '', fwBranch: '', btVersion: '', btMac: '' })
     if (unlistenDisconnect) {
       unlistenDisconnect()
       unlistenDisconnect = null
     }
+
+    import('./production').then(({ useProductionStore }) => {
+      const production = useProductionStore()
+      production.running = false
+      production.resetAll()
+      production.clearLogs()
+    }).catch(() => {})
+
+    scanPorts()
   }
 
   async function enterProductionMode() {
