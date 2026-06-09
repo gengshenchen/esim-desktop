@@ -32,6 +32,15 @@ export interface LogEntry {
   message: string
 }
 
+export type KeyState = 'untested' | 'pressed' | 'passed' | 'stuck'
+
+export interface KeyInfo {
+  name: string
+  label: string
+  state: KeyState
+  pressedAt: number
+}
+
 const ALL_MODEM_ITEMS: Omit<TestItem, 'status' | 'rawResponse' | 'parsedData' | 'error' | 'durationMs'>[] = [
   { id: 'MDSIM', name: 'SIM 状态', domain: 'modem', judgeType: 'auto' },
   { id: 'MDREG', name: '网络注册', domain: 'modem', judgeType: 'auto' },
@@ -86,10 +95,13 @@ export const useProductionStore = defineStore('production', () => {
   let lastReportSnapshot = ''
   let savePending = false
 
+  // Key test state
   const keyTestActive = ref(false)
-  const keyTestKeys = ref<Record<string, boolean>>({})
-  const keyTestExpected = ref<string[]>(['PTT', 'VOL+', 'VOL-', 'POWER'])
+  const keyInfos = ref<KeyInfo[]>([])
   let keyTestUnlisten: (() => void) | null = null
+  let stuckTimer: ReturnType<typeof setInterval> | null = null
+  let keyTestStartTime = 0
+
   const configDirty = ref(false)
 
   const enabledIds = computed(() => {
@@ -122,13 +134,6 @@ export const useProductionStore = defineStore('production', () => {
     mcuItems.value = ALL_MCU_ITEMS
       .filter(def => { const c = cfgMap.get(def.id); return !c || c.enabled })
       .map(toTestItem)
-
-    const keyCfg = cfgMap.get('MCUKEY')
-    if (keyCfg?.params?.keys && Array.isArray(keyCfg.params.keys)) {
-      keyTestExpected.value = keyCfg.params.keys
-    } else {
-      keyTestExpected.value = ['PTT', 'VOL+', 'VOL-', 'POWER']
-    }
 
     reportSaved.value = false
     currentReportId.value = ''
@@ -271,50 +276,166 @@ export const useProductionStore = defineStore('production', () => {
     }
   }
 
-  async function startKeyTest(): Promise<boolean> {
-    keyTestActive.value = true
-    keyTestKeys.value = {}
-    for (const k of keyTestExpected.value) {
-      keyTestKeys.value[k] = false
+  // --- Key test state machine ---
+
+  function getKeyTestParams() {
+    const cfgMap = new Map(testItemConfigs.value.map(c => [c.id, c]))
+    const keyCfg = cfgMap.get('MCUKEY')
+    const timeoutS = keyCfg?.params?.timeout_s ?? 30
+    const keyTimeoutS = keyCfg?.params?.key_timeout_s ?? 10
+    return { timeoutS, keyTimeoutS }
+  }
+
+  function initKeyInfos() {
+    const device = useDeviceStore()
+    const keys = device.productConfig?.key_test?.keys || []
+    if (keys.length > 0) {
+      keyInfos.value = keys.map(k => ({
+        name: k.name,
+        label: k.label,
+        state: 'untested' as KeyState,
+        pressedAt: 0,
+      }))
+    } else {
+      keyInfos.value = [
+        { name: 'MULTI_FUN', label: '多功能键', state: 'untested', pressedAt: 0 },
+        { name: 'VOL_UP', label: '音量+', state: 'untested', pressedAt: 0 },
+        { name: 'VOL_DOWN', label: '音量-/关机键', state: 'untested', pressedAt: 0 },
+      ]
+    }
+  }
+
+  function handleKeyEvent(keyName: string, state: string) {
+    const info = keyInfos.value.find(k => k.name === keyName)
+    if (!info) {
+      addLog('warn', `收到未配置的按键: ${keyName}`)
+      return
+    }
+
+    if (state === 'PRESS') {
+      if (info.state === 'untested') {
+        info.state = 'pressed'
+        info.pressedAt = Date.now()
+        addLog('info', `按键检测: ${info.label} 按下`)
+      } else if (info.state === 'pressed') {
+        info.pressedAt = Date.now()
+      }
+    } else if (state === 'RELEASE') {
+      if (info.state === 'pressed') {
+        info.state = 'passed'
+        addLog('info', `按键检测: ${info.label} 释放 - 通过`)
+      } else if (info.state === 'untested') {
+        addLog('warn', `按键检测: ${info.label} 释放但未按下，忽略`)
+      }
+    }
+  }
+
+  function checkKeyTestCompletion(): { done: boolean; passed: boolean; reason: string } {
+    const { timeoutS, keyTimeoutS } = getKeyTestParams()
+    const nowMs = Date.now()
+
+    // Check STUCK
+    for (const k of keyInfos.value) {
+      if (k.state === 'pressed' && (nowMs - k.pressedAt) > keyTimeoutS * 1000) {
+        k.state = 'stuck'
+        addLog('warn', `按键检测: ${k.label} 卡住 (超过${keyTimeoutS}s无释放)`)
+      }
+    }
+
+    const allTerminal = keyInfos.value.every(k => k.state === 'passed' || k.state === 'stuck')
+    const allPassed = keyInfos.value.every(k => k.state === 'passed')
+    const hasStuck = keyInfos.value.some(k => k.state === 'stuck')
+
+    if (allPassed) {
+      return { done: true, passed: true, reason: '' }
+    }
+
+    if (allTerminal && hasStuck) {
+      const stuckNames = keyInfos.value.filter(k => k.state === 'stuck').map(k => k.label).join(', ')
+      return { done: true, passed: false, reason: `${stuckNames} 卡住` }
+    }
+
+    // Total timeout
+    if ((nowMs - keyTestStartTime) > timeoutS * 1000) {
+      const incomplete = keyInfos.value
+        .filter(k => k.state !== 'passed')
+        .map(k => k.label)
+        .join(', ')
+      return { done: true, passed: false, reason: `超时，未通过: ${incomplete}` }
+    }
+
+    return { done: false, passed: false, reason: '' }
+  }
+
+  async function finishKeyTest(passed: boolean, reason: string) {
+    if (!keyTestActive.value) return
+    keyTestActive.value = false
+
+    if (keyTestUnlisten) {
+      keyTestUnlisten()
+      keyTestUnlisten = null
+    }
+    if (stuckTimer) {
+      clearInterval(stuckTimer)
+      stuckTimer = null
     }
 
     try {
+      await invoke('send_at_command', { cmd: 'AT+MCUKEY=0', timeoutMs: 3000 })
+    } catch {
+      // MCU 60s auto-exit
+    }
+
+    const durationMs = Date.now() - keyTestStartTime
+    const parsedData: Record<string, string> = {}
+    for (const k of keyInfos.value) parsedData[k.name] = k.state
+    const rawResponse = keyInfos.value.map(k => `${k.name}:${k.state}`).join(' ')
+
+    updateItem('MCUKEY', {
+      status: passed ? 'pass' : 'fail',
+      durationMs,
+      parsedData,
+      rawResponse,
+      error: reason,
+    })
+
+    addLog(
+      passed ? 'success' : 'error',
+      `[按键测试] ${passed ? 'PASS' : 'FAIL: ' + reason} (${(durationMs / 1000).toFixed(1)}s)`,
+    )
+  }
+
+  async function startKeyTestLoop() {
+    keyTestStartTime = Date.now()
+    keyTestActive.value = true
+
+    try {
       keyTestUnlisten = (await listen<{ key: string; state: string }>('key:event', (event) => {
-        const key = event.payload.key
-        if (key in keyTestKeys.value) {
-          keyTestKeys.value[key] = true
-          addLog('info', `按键检测: ${key} ${event.payload.state}`)
-        }
+        if (!keyTestActive.value) return
+        handleKeyEvent(event.payload.key, event.payload.state)
       })) as unknown as () => void
     } catch {
       // event not available
     }
 
-    const cfgMap = new Map(testItemConfigs.value.map(c => [c.id, c]))
-    const keyCfg = cfgMap.get('MCUKEY')
-    const timeoutS = keyCfg?.params?.timeout_s ?? 30
-    const timeout = timeoutS * 1000
-
-    const start = Date.now()
-    while (Date.now() - start < timeout) {
-      if (Object.values(keyTestKeys.value).every(v => v)) {
-        stopKeyTest()
-        return true
+    stuckTimer = setInterval(() => {
+      if (!keyTestActive.value) return
+      const result = checkKeyTestCompletion()
+      if (result.done) {
+        finishKeyTest(result.passed, result.reason)
       }
-      await new Promise(r => setTimeout(r, 500))
-    }
-
-    stopKeyTest()
-    const missing = keyTestExpected.value.filter(k => !keyTestKeys.value[k])
-    addLog('warn', `按键测试超时，未检测: ${missing.join(', ')}`)
-    return false
+    }, 500)
   }
 
-  function stopKeyTest() {
+  function stopKeyTestCleanup() {
     keyTestActive.value = false
     if (keyTestUnlisten) {
       keyTestUnlisten()
       keyTestUnlisten = null
+    }
+    if (stuckTimer) {
+      clearInterval(stuckTimer)
+      stuckTimer = null
     }
   }
 
@@ -399,54 +520,46 @@ export const useProductionStore = defineStore('production', () => {
     const autoItems = [...modemItems.value, ...mcuItems.value]
       .filter(i => i.judgeType === 'auto' && i.id !== 'MCURST')
 
+    const testIds = autoItems.map(i => i.id)
+
+    for (const item of autoItems) {
+      updateItem(item.id, { status: 'running', error: '', rawResponse: '' })
+    }
+
     let passCount = 0
     let failCount = 0
 
-    for (const item of autoItems) {
-      if (!running.value) {
-        addLog('warn', '用户手动停止')
-        break
-      }
+    const unlisten = await listen<SingleTestResult>('test:result', (event) => {
+      const result = event.payload
+      const item = findItem(result.id)
 
-      addLog('info', `[${passCount + failCount + 1}/${autoItems.length}] 测试 [${item.name}]`)
-      updateItem(item.id, { status: 'running', error: '', rawResponse: '' })
+      addLog('info', `TX: ${result.command}`)
+      addLog('info', `RX: ${result.raw_response || '(空)'}`)
 
-      try {
-        const result = await invoke<SingleTestResult>('run_single_test', { testId: item.id })
+      updateItem(result.id, {
+        status: result.status as TestStatus,
+        rawResponse: result.raw_response,
+        parsedData: result.parsed_data,
+        error: result.error,
+        durationMs: result.duration_ms,
+      })
 
-        addLog('info', `TX: ${result.command}`)
-        addLog('info', `RX: ${result.raw_response || '(空)'}`)
-
-        updateItem(result.id, {
-          status: result.status as TestStatus,
-          rawResponse: result.raw_response,
-          parsedData: result.parsed_data,
-          error: result.error,
-          durationMs: result.duration_ms,
-        })
-
-        if (result.status === 'pass') {
-          passCount++
-          addLog('success', `[${item.name}] PASS (${result.duration_ms}ms)`)
-        } else {
-          failCount++
-          addLog('error', `[${item.name}] FAIL: ${result.error}`)
-        }
-      } catch (e: any) {
+      if (result.status === 'pass') {
+        passCount++
+        addLog('success', `[${item?.name || result.id}] PASS (${result.duration_ms}ms)`)
+      } else {
         failCount++
-        updateItem(item.id, { status: 'fail', error: String(e) })
-        addLog('error', `[${item.name}] 异常: ${e}`)
+        addLog('error', `[${item?.name || result.id}] FAIL: ${result.error}`)
       }
+    })
+
+    try {
+      await invoke('run_auto_test', { testIds })
+    } catch (e: any) {
+      addLog('error', `批量测试异常: ${e}`)
     }
 
-    addLog('info', '退出产测模式 AT+PROD=0 ...')
-    try {
-      await device.exitProductionMode()
-      addLog('success', '已退出产测模式')
-    } catch (e) {
-      device.productionMode = 'idle'
-      addLog('warn', `退出产测模式异常: ${e}`)
-    }
+    ;(unlisten as unknown as () => void)()
 
     const rstItem = findItem('MCURST')
     if (rstItem) {
@@ -477,6 +590,15 @@ export const useProductionStore = defineStore('production', () => {
         updateItem('MCURST', { status: 'fail', error: String(e) })
         addLog('error', `[恢复出厂] 异常: ${e}`)
       }
+    }
+
+    addLog('info', '退出产测模式 AT+PROD=0 ...')
+    try {
+      await device.exitProductionMode()
+      addLog('success', '已退出产测模式')
+    } catch (e) {
+      device.productionMode = 'idle'
+      addLog('warn', `退出产测模式异常: ${e}`)
     }
 
     const totalDuration = Date.now() - startTime
@@ -512,8 +634,7 @@ export const useProductionStore = defineStore('production', () => {
     logs,
     testItemConfigs,
     keyTestActive,
-    keyTestKeys,
-    keyTestExpected,
+    keyInfos,
     enabledIds,
     resetAll,
     clearLogs,
@@ -528,7 +649,10 @@ export const useProductionStore = defineStore('production', () => {
     runAutoTest,
     manualJudge,
     queryDeviceInfo,
-    startKeyTest,
-    stopKeyTest,
+    initKeyInfos,
+    startKeyTestLoop,
+    finishKeyTest,
+    stopKeyTestCleanup,
+    getKeyTestParams,
   }
 })

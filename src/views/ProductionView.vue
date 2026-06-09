@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import {
   NSpace, NButton, NTag, NAlert, NScrollbar, NModal, NDivider,
   useDialog,
@@ -24,7 +24,8 @@ let manualStartTime = 0
 
 // 按键测试弹框状态
 const showKeyTest = ref(false)
-let keyTestStartTime = 0
+const keyTestElapsed = ref(0)
+let keyTestElapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const MANUAL_HINTS: Record<string, string> = {
   MCULED: '请观察设备 LED 是否正常亮起',
@@ -42,10 +43,25 @@ onMounted(() => {
   production.reloadIfDirty()
 })
 
-const allItems = computed(() => [...production.modemItems, ...production.mcuItems])
+onUnmounted(() => {
+  if (keyTestElapsedTimer) {
+    clearInterval(keyTestElapsedTimer)
+    keyTestElapsedTimer = null
+  }
+})
+
+const allItems = computed(() => {
+  const items = [...production.modemItems, ...production.mcuItems]
+  const order: Record<string, number> = { auto: 0, semi_auto: 1, manual: 2 }
+  return items
+    .filter(i => i.id !== 'MCURST')
+    .sort((a, b) => (order[a.judgeType] ?? 9) - (order[b.judgeType] ?? 9))
+    .concat(items.filter(i => i.id === 'MCURST'))
+})
 const passCount = computed(() => allItems.value.filter(i => i.status === 'pass').length)
 const failCount = computed(() => allItems.value.filter(i => i.status === 'fail').length)
 const latestLog = computed(() => production.logs.length > 0 ? production.logs[production.logs.length - 1] : null)
+const busy = computed(() => production.running || production.keyTestActive)
 
 watch(() => production.logs.length, () => {
   if (logState.value === 'expanded') {
@@ -191,31 +207,105 @@ async function cancelManualTest() {
 
 // --- 按键测试 ---
 
+const keyTestPassedCount = computed(() => production.keyInfos.filter(k => k.state === 'passed').length)
+const keyTestRemaining = computed(() => {
+  const { timeoutS } = production.getKeyTestParams()
+  const remaining = Math.max(0, timeoutS - keyTestElapsed.value)
+  return remaining
+})
+
+function keyStateBorder(state: string): string {
+  if (state === 'passed') return '#18a058'
+  if (state === 'pressed') return '#2080f0'
+  if (state === 'stuck') return '#d03050'
+  return '#ddd'
+}
+
+function keyStateBg(state: string): string {
+  if (state === 'passed') return '#f0fdf4'
+  if (state === 'pressed') return '#eff6ff'
+  if (state === 'stuck') return '#fef2f2'
+  return '#fff'
+}
+
+function keyStateIcon(state: string): string {
+  if (state === 'passed') return '✓'
+  if (state === 'pressed') return '↓'
+  if (state === 'stuck') return '✕'
+  return '○'
+}
+
+function keyStateLabel(state: string): string {
+  if (state === 'passed') return '通过'
+  if (state === 'pressed') return '已按下'
+  if (state === 'stuck') return '卡住'
+  return '待测'
+}
+
 async function openKeyTest() {
-  showKeyTest.value = true
-  keyTestStartTime = Date.now()
-  production.runSingleTest('MCUKEY')
-  const passed = await production.startKeyTest()
-  const durationMs = Date.now() - keyTestStartTime
-  production.updateItem('MCUKEY', { status: passed ? 'pass' : 'fail', durationMs })
-  if (passed) {
-    production.addLog('success', `[按键测试] 全部按键已检测 PASS (${(durationMs / 1000).toFixed(1)}s)`)
+  if (busy.value) return
+
+  if (device.productionMode !== 'production') {
+    production.addLog('info', '进入产测模式...')
+    try {
+      await device.enterProductionMode()
+      production.addLog('success', '已进入产测模式')
+    } catch (e: any) {
+      production.addLog('error', `进入产测模式失败: ${e}`)
+      return
+    }
   }
+
+  production.updateItem('MCUKEY', { status: 'running', error: '', rawResponse: '' })
+  production.addLog('info', '[按键测试] 发送 AT+MCUKEY=1')
+
+  try {
+    const resp = await invoke<{ lines: string[]; success: boolean }>('send_at_command', { cmd: 'AT+MCUKEY=1', timeoutMs: 5000 })
+    if (!resp.success) {
+      production.updateItem('MCUKEY', { status: 'fail', error: 'AT+MCUKEY=1 失败' })
+      production.addLog('error', '[按键测试] AT+MCUKEY=1 失败')
+      return
+    }
+  } catch (e: any) {
+    production.updateItem('MCUKEY', { status: 'fail', error: String(e) })
+    production.addLog('error', `[按键测试] AT+MCUKEY=1 异常: ${e}`)
+    return
+  }
+
+  production.initKeyInfos()
+  await production.startKeyTestLoop()
+  showKeyTest.value = true
+
+  keyTestElapsed.value = 0
+  keyTestElapsedTimer = setInterval(() => {
+    keyTestElapsed.value++
+  }, 1000)
 }
 
-function stopKeyTest() {
-  const durationMs = Date.now() - keyTestStartTime
-  production.stopKeyTest()
-  production.updateItem('MCUKEY', { status: 'fail', error: '手动停止', durationMs })
-}
-
-function keyTestManualJudge(pass: boolean) {
-  const durationMs = Date.now() - keyTestStartTime
-  production.stopKeyTest()
-  production.updateItem('MCUKEY', { status: pass ? 'pass' : 'fail', durationMs })
-  production.addLog(pass ? 'success' : 'error', `[按键测试] 人工判定: ${pass ? 'PASS' : 'FAIL'} (${(durationMs / 1000).toFixed(1)}s)`)
+async function stopKeyTest() {
+  if (keyTestElapsedTimer) {
+    clearInterval(keyTestElapsedTimer)
+    keyTestElapsedTimer = null
+  }
+  const incomplete = production.keyInfos
+    .filter(k => k.state !== 'passed')
+    .map(k => k.label)
+    .join(', ')
+  await production.finishKeyTest(false, `手动停止，未通过: ${incomplete}`)
   showKeyTest.value = false
 }
+
+watch(() => production.keyTestActive, (active) => {
+  if (!active && keyTestElapsedTimer) {
+    clearInterval(keyTestElapsedTimer)
+    keyTestElapsedTimer = null
+  }
+  if (!active && showKeyTest.value) {
+    setTimeout(() => {
+      showKeyTest.value = false
+    }, 2000)
+  }
+})
 </script>
 
 <template>
@@ -231,7 +321,7 @@ function keyTestManualJudge(pass: boolean) {
           type="primary"
           size="small"
           @click="production.runAutoTest()"
-          :disabled="production.running"
+          :disabled="busy"
           :loading="production.running"
         >
           一键产测
@@ -244,7 +334,7 @@ function keyTestManualJudge(pass: boolean) {
         >
           停止
         </NButton>
-        <NButton size="small" @click="production.resetAll()" :disabled="production.running">
+        <NButton size="small" @click="production.resetAll()" :disabled="busy">
           重置
         </NButton>
         <span style="font-size: 13px;">
@@ -303,7 +393,7 @@ function keyTestManualJudge(pass: boolean) {
                 <NButton
                   size="tiny"
                   @click="handleTest(item)"
-                  :disabled="production.running || item.status === 'running'"
+                  :disabled="busy || item.status === 'running'"
                 >
                   测试
                 </NButton>
@@ -398,34 +488,55 @@ function keyTestManualJudge(pass: boolean) {
         :closable="false"
       >
         <div style="text-align: center;">
-          <NSpace justify="center" style="margin: 20px 0;">
+          <NSpace justify="center" style="margin: 20px 0;" :size="16">
             <div
-              v-for="key in production.keyTestExpected"
-              :key="key"
-              style="width: 80px; height: 80px; border: 2px solid #ddd; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;"
-              :style="{ borderColor: production.keyTestKeys[key] ? '#18a058' : '#ddd', background: production.keyTestKeys[key] ? '#f0fdf4' : '#fff' }"
+              v-for="key in production.keyInfos"
+              :key="key.name"
+              style="width: 90px; height: 90px; border: 2px solid #ddd; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; transition: all 0.3s;"
+              :style="{ borderColor: keyStateBorder(key.state), background: keyStateBg(key.state) }"
+              :class="{ 'key-pressed-pulse': key.state === 'pressed' }"
             >
-              <div style="font-size: 20px;">{{ production.keyTestKeys[key] ? '●' : '○' }}</div>
-              <div style="font-size: 12px; font-weight: bold;">{{ key }}</div>
+              <div style="font-size: 22px; font-weight: bold;">{{ keyStateIcon(key.state) }}</div>
+              <div style="font-size: 12px; font-weight: bold;">{{ key.label }}</div>
+              <div style="font-size: 11px; color: #888;">{{ keyStateLabel(key.state) }}</div>
             </div>
           </NSpace>
-          <div style="color: #666; font-size: 13px; margin-bottom: 12px;">
-            进度: {{ Object.values(production.keyTestKeys).filter(v => v).length }}/{{ production.keyTestExpected.length }}
+          <div style="color: #666; font-size: 13px; margin-bottom: 8px;">
+            进度: {{ keyTestPassedCount }}/{{ production.keyInfos.length }}
+            <span style="margin-left: 12px; color: #999;">剩余: {{ keyTestRemaining }}s</span>
           </div>
-          <div style="color: #999; font-size: 12px;">
-            {{ production.keyTestActive ? '请依次按下所有按键...' : '按键测试已结束' }}
+          <div style="color: #999; font-size: 12px; margin-bottom: 4px;">
+            {{ production.keyTestActive ? '请依次按下并释放所有按键...' : (keyTestPassedCount === production.keyInfos.length ? '全部通过!' : '测试已结束') }}
           </div>
           <NDivider />
           <NSpace justify="center" :size="16">
-            <NButton type="success" size="large" style="width: 120px;" @click="keyTestManualJudge(true)">PASS</NButton>
-            <NButton type="error" size="large" style="width: 120px;" @click="keyTestManualJudge(false)">FAIL</NButton>
+            <NButton
+              v-if="production.keyTestActive"
+              type="error" size="large" style="width: 120px;"
+              @click="stopKeyTest"
+            >
+              停止
+            </NButton>
+            <NButton
+              v-if="!production.keyTestActive"
+              quaternary size="small"
+              @click="showKeyTest = false"
+            >
+              关闭
+            </NButton>
           </NSpace>
-          <div style="margin-top: 12px;">
-            <NButton v-if="production.keyTestActive" quaternary size="small" @click="stopKeyTest">停止</NButton>
-            <NButton v-else quaternary size="small" @click="showKeyTest = false">关闭</NButton>
-          </div>
         </div>
       </NModal>
     </template>
   </div>
 </template>
+
+<style scoped>
+@keyframes key-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.key-pressed-pulse {
+  animation: key-pulse 1.2s ease-in-out infinite;
+}
+</style>
