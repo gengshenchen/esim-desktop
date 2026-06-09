@@ -185,8 +185,21 @@ export const useProductionStore = defineStore('production', () => {
   function checkAutoSaveReport() {
     if (savePending) return
     const allItems = [...modemItems.value, ...mcuItems.value]
+    const nonRstItems = allItems.filter(i => i.id !== 'MCURST')
+    const rstItem = allItems.find(i => i.id === 'MCURST')
+
     const testedItems = allItems.filter(i => i.status === 'pass' || i.status === 'fail')
     if (testedItems.length === 0) return
+
+    const nonRstDone = nonRstItems.every(i => i.status === 'pass' || i.status === 'fail' || i.status === 'skipped')
+    if (!nonRstDone) return
+
+    if (rstItem && rstItem.status === 'pending') {
+      savePending = true
+      runFactoryReset().finally(() => { savePending = false })
+      return
+    }
+
     const allDone = allItems.every(i => i.status === 'pass' || i.status === 'fail' || i.status === 'skipped')
     if (!allDone) return
 
@@ -198,6 +211,46 @@ export const useProductionStore = defineStore('production', () => {
     const failCount = testedItems.filter(i => i.status === 'fail').length
     savePending = true
     saveReport(passCount, failCount).finally(() => { savePending = false })
+  }
+
+  async function runFactoryReset() {
+    const device = useDeviceStore()
+
+    addLog('info', `测试 [恢复出厂]`)
+    updateItem('MCURST', { status: 'running', error: '', rawResponse: '' })
+    try {
+      const result = await invoke<SingleTestResult>('run_single_test', { testId: 'MCURST' })
+
+      addLog('info', `TX: ${result.command}`)
+      addLog('info', `RX: ${result.raw_response || '(空)'}`)
+
+      updateItem('MCURST', {
+        status: result.status as TestStatus,
+        rawResponse: result.raw_response,
+        parsedData: result.parsed_data,
+        error: result.error,
+        durationMs: result.duration_ms,
+      })
+      if (result.status === 'pass') {
+        addLog('success', `[恢复出厂] PASS (${result.duration_ms}ms)`)
+      } else {
+        addLog('error', `[恢复出厂] FAIL: ${result.error}`)
+      }
+    } catch (e: any) {
+      updateItem('MCURST', { status: 'fail', error: String(e) })
+      addLog('error', `[恢复出厂] 异常: ${e}`)
+    }
+
+    if (device.productionMode === 'production') {
+      addLog('info', '退出产测模式 AT+PROD=0 ...')
+      try {
+        await device.exitProductionMode()
+        addLog('success', '已退出产测模式')
+      } catch (e) {
+        device.productionMode = 'idle'
+        addLog('warn', `退出产测模式异常: ${e}`)
+      }
+    }
   }
 
   async function queryDeviceInfo() {
@@ -561,55 +614,28 @@ export const useProductionStore = defineStore('production', () => {
 
     ;(unlisten as unknown as () => void)()
 
-    const rstItem = findItem('MCURST')
-    if (rstItem) {
-      addLog('info', `测试 [恢复出厂]`)
-      updateItem('MCURST', { status: 'running', error: '', rawResponse: '' })
-      try {
-        const result = await invoke<SingleTestResult>('run_single_test', { testId: 'MCURST' })
-
-        addLog('info', `TX: ${result.command}`)
-        addLog('info', `RX: ${result.raw_response || '(空)'}`)
-
-        updateItem('MCURST', {
-          status: result.status as TestStatus,
-          rawResponse: result.raw_response,
-          parsedData: result.parsed_data,
-          error: result.error,
-          durationMs: result.duration_ms,
-        })
-        if (result.status === 'pass') {
-          passCount++
-          addLog('success', `[恢复出厂] PASS (${result.duration_ms}ms)`)
-        } else {
-          failCount++
-          addLog('error', `[恢复出厂] FAIL: ${result.error}`)
-        }
-      } catch (e: any) {
-        failCount++
-        updateItem('MCURST', { status: 'fail', error: String(e) })
-        addLog('error', `[恢复出厂] 异常: ${e}`)
-      }
-    }
-
-    addLog('info', '退出产测模式 AT+PROD=0 ...')
-    try {
-      await device.exitProductionMode()
-      addLog('success', '已退出产测模式')
-    } catch (e) {
-      device.productionMode = 'idle'
-      addLog('warn', `退出产测模式异常: ${e}`)
-    }
-
     const totalDuration = Date.now() - startTime
     addLog('info', `====== 自动测试完成: 通过 ${passCount}, 失败 ${failCount}, 耗时 ${(totalDuration / 1000).toFixed(1)}s ======`)
 
     const manualItems = [...modemItems.value, ...mcuItems.value].filter(
-      i => i.judgeType === 'manual' || i.judgeType === 'semi_auto'
+      i => (i.judgeType === 'manual' || i.judgeType === 'semi_auto') && i.status === 'pending'
     )
+    const rstItem = findItem('MCURST')
+
     if (manualItems.length > 0) {
-      addLog('info', `还有 ${manualItems.length} 项手动测试待完成，全部完成后自动保存报告`)
+      addLog('info', `还有 ${manualItems.length} 项手动测试待完成，全部完成后自动执行恢复出厂并保存报告`)
+    } else if (rstItem) {
+      // No manual items — MCURST + exit will be triggered by checkAutoSaveReport
     } else {
+      // No manual items and no MCURST — exit production and save now
+      addLog('info', '退出产测模式 AT+PROD=0 ...')
+      try {
+        await device.exitProductionMode()
+        addLog('success', '已退出产测模式')
+      } catch (e) {
+        device.productionMode = 'idle'
+        addLog('warn', `退出产测模式异常: ${e}`)
+      }
       await saveReport(passCount, failCount)
     }
 
