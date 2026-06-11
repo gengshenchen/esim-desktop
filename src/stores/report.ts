@@ -93,14 +93,18 @@ export const useReportStore = defineStore('report', () => {
     }
   }
 
-  async function exportCsv(filter?: Partial<ReportFilter>): Promise<string> {
+  async function exportCsv(filter?: Partial<ReportFilter>, path?: string): Promise<string> {
     const f: ReportFilter = {
       date_from: filter?.date_from ?? null,
       date_to: filter?.date_to ?? null,
       result: filter?.result ?? null,
       search: filter?.search ?? null,
     }
-    return await invoke<string>('cmd_export_csv', { filter: f })
+    return await invoke<string>('cmd_export_csv', { filter: f, path: path ?? null })
+  }
+
+  async function getReportPath(id: string): Promise<string> {
+    return await invoke<string>('cmd_get_report_path', { reportId: id })
   }
 
   return {
@@ -111,5 +115,6 @@ export const useReportStore = defineStore('report', () => {
     getReport,
     deleteReport,
     exportCsv,
+    getReportPath,
   }
 })

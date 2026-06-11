@@ -6,8 +6,10 @@ import {
 } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { useDeviceStore } from '@/stores/device'
+import { useProductionStore } from '@/stores/production'
 
 const device = useDeviceStore()
+const production = useProductionStore()
 const message = useMessage()
 const dialogApi = useDialog()
 
@@ -219,6 +221,10 @@ async function clearConfig() {
 }
 
 async function ensureProductionMode(): Promise<boolean> {
+  if (production.keyTestActive) {
+    message.warning('按键测试进行中，请先完成按键测试')
+    return false
+  }
   if (device.productionMode === 'production') return true
   try {
     await device.enterProductionMode()

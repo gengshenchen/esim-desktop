@@ -20,6 +20,21 @@ export interface DeviceInfo {
   btMac: string
 }
 
+export interface KeyDef {
+  name: string
+  label: string
+  note: string
+}
+
+export interface KeyTestConfig {
+  keys: KeyDef[]
+}
+
+export interface ProductConfig {
+  product: string
+  key_test: KeyTestConfig
+}
+
 export type ProductionMode = 'idle' | 'entering' | 'production' | 'exiting'
 
 export const useDeviceStore = defineStore('device', () => {
@@ -28,6 +43,9 @@ export const useDeviceStore = defineStore('device', () => {
   const connected = ref(false)
   const capability = ref<DeviceCapability | null>(null)
   const productionMode = ref<ProductionMode>('idle')
+  const productConfig = ref<ProductConfig | null>(null)
+  const autoReconnect = ref(true)
+  const autoReconnecting = ref(false)
   const deviceInfo = reactive<DeviceInfo>({
     imei: '',
     iccid: '',
@@ -39,6 +57,61 @@ export const useDeviceStore = defineStore('device', () => {
   })
 
   let unlistenDisconnect: (() => void) | null = null
+  let reconnectTimer: ReturnType<typeof setInterval> | null = null
+
+  function stopReconnectTimer() {
+    if (reconnectTimer) {
+      clearInterval(reconnectTimer)
+      reconnectTimer = null
+    }
+    autoReconnecting.value = false
+  }
+
+  function startReconnectTimer(portName: string) {
+    stopReconnectTimer()
+    autoReconnecting.value = true
+
+    // Snapshot ports at disconnect time; any new port appearing later is the re-plugged device
+    let baselinePorts: string[] = [...availablePorts.value]
+
+    reconnectTimer = setInterval(async () => {
+      try {
+        const ports = await invoke<string[]>('scan_ports')
+        availablePorts.value = ports
+
+        // Prefer the same port name; otherwise pick any newly appeared port
+        let target: string | null = null
+        if (ports.includes(portName)) {
+          target = portName
+        } else {
+          const newPort = ports.find(p => !baselinePorts.includes(p))
+          if (newPort) target = newPort
+        }
+
+        if (target) {
+          stopReconnectTimer()
+          try {
+            await connect(target)
+          } catch {
+            // Update baseline so we don't keep retrying a port that fails
+            baselinePorts = [...availablePorts.value]
+            startReconnectTimer(portName)
+          }
+        }
+      } catch {
+        // scan failed, retry next tick
+      }
+    }, 1000)
+  }
+
+  async function loadAutoReconnectSetting() {
+    try {
+      const settings = await invoke<{ auto_reconnect?: boolean }>('cmd_load_settings')
+      autoReconnect.value = settings.auto_reconnect !== false
+    } catch {
+      autoReconnect.value = true
+    }
+  }
 
   async function scanPorts() {
     try {
@@ -52,9 +125,11 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   async function connect(port: string) {
+    stopReconnectTimer()
     try {
       capability.value = await invoke<DeviceCapability>('connect', { port })
       connected.value = true
+      selectedPort.value = port
       productionMode.value = 'idle'
 
       try {
@@ -67,8 +142,16 @@ export const useDeviceStore = defineStore('device', () => {
       }
 
       try {
+        productConfig.value = await invoke<ProductConfig>('cmd_load_product_config', {
+          product: capability.value?.product || 'UNKNOWN',
+        })
+      } catch {
+        productConfig.value = null
+      }
+
+      try {
         unlistenDisconnect = (await listen('serial:disconnected', () => {
-          handleDisconnect()
+          handleDisconnect(false)
         })) as unknown as () => void
       } catch (e) {
         console.warn('event listen not available:', e)
@@ -90,28 +173,42 @@ export const useDeviceStore = defineStore('device', () => {
     } catch (e) {
       console.error('disconnect failed:', e)
     }
-    handleDisconnect()
+    handleDisconnect(true)
   }
 
-  function handleDisconnect() {
+  function handleDisconnect(manual: boolean) {
+    const lastPort = selectedPort.value
     connected.value = false
     capability.value = null
     productionMode.value = 'idle'
-    selectedPort.value = null
+    productConfig.value = null
     Object.assign(deviceInfo, { imei: '', iccid: '', fwVersion: '', fwDate: '', fwBranch: '', btVersion: '', btMac: '' })
     if (unlistenDisconnect) {
       unlistenDisconnect()
       unlistenDisconnect = null
     }
 
+    // Release Rust-side write port fd so kernel can reclaim the ttyACM number
+    if (!manual) {
+      invoke('disconnect').catch(() => {})
+    }
+
     import('./production').then(({ useProductionStore }) => {
       const production = useProductionStore()
+      production.stopKeyTestCleanup()
       production.running = false
       production.resetAll()
       production.clearLogs()
     }).catch(() => {})
 
-    scanPorts()
+    if (!manual && autoReconnect.value && lastPort) {
+      selectedPort.value = lastPort
+      startReconnectTimer(lastPort)
+    } else {
+      selectedPort.value = null
+      stopReconnectTimer()
+      scanPorts()
+    }
   }
 
   async function enterProductionMode() {
@@ -142,11 +239,16 @@ export const useDeviceStore = defineStore('device', () => {
     connected,
     capability,
     productionMode,
+    productConfig,
+    autoReconnect,
+    autoReconnecting,
     deviceInfo,
     scanPorts,
     connect,
     disconnect,
     enterProductionMode,
     exitProductionMode,
+    loadAutoReconnectSetting,
+    stopReconnectTimer,
   }
 })

@@ -53,6 +53,12 @@ async function toggleConnection() {
     return
   }
 
+  if (device.autoReconnecting) {
+    device.stopReconnectTimer()
+    message.info('已取消自动重连')
+    return
+  }
+
   if (!device.selectedPort) {
     message.warning('请先选择串口')
     return
@@ -71,6 +77,7 @@ async function toggleConnection() {
 
 onMounted(() => {
   device.scanPorts()
+  device.loadAutoReconnectSetting()
 })
 </script>
 
@@ -96,13 +103,13 @@ onMounted(() => {
       placeholder="选择串口"
       size="small"
       style="width: 160px;"
-      :disabled="device.connected"
+      :disabled="device.connected || device.autoReconnecting"
     />
 
     <NButton
       size="small"
       @click="handleScan"
-      :disabled="device.connected"
+      :disabled="device.connected || device.autoReconnecting"
       :loading="scanning"
     >
       扫描
@@ -110,19 +117,19 @@ onMounted(() => {
 
     <NButton
       size="small"
-      :type="device.connected ? 'error' : 'primary'"
+      :type="device.connected ? 'error' : device.autoReconnecting ? 'warning' : 'primary'"
       @click="toggleConnection"
-      :disabled="(!device.selectedPort && !device.connected) || connecting"
+      :disabled="(!device.selectedPort && !device.connected && !device.autoReconnecting) || connecting"
       :loading="connecting"
     >
-      {{ device.connected ? '断开' : connecting ? '连接中...' : '连接' }}
+      {{ device.connected ? '断开' : device.autoReconnecting ? '取消等待' : connecting ? '连接中...' : '连接' }}
     </NButton>
 
     <NTag
-      :type="device.connected ? 'success' : 'default'"
+      :type="device.connected ? 'success' : device.autoReconnecting ? 'warning' : 'default'"
       size="small"
     >
-      {{ device.connected ? (device.productionMode === 'production' ? 'PRODUCTION' : 'IDLE') : '未连接' }}
+      {{ device.connected ? (device.productionMode === 'production' ? 'PRODUCTION' : 'IDLE') : device.autoReconnecting ? '等待设备...' : '未连接' }}
     </NTag>
   </div>
 </template>

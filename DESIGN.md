@@ -167,8 +167,8 @@ AT+<CMD>=<args>\r\n
 按键测试模式下，MCU 通过模组异步上报按键事件：
 
 ```
-+MCUKEY:KEY=PTT,STATE=PRESS
-+MCUKEY:KEY=VOL+,STATE=PRESS
++MCUKEY:KEY=MULTI_FUN,STATE=PRESS
++MCUKEY:KEY=VOL_UP,STATE=PRESS
 ```
 
 前端通过 Tauri Event 监听异步上报，实时更新按键状态。
@@ -311,25 +311,27 @@ WAIT_RESPONSE
 
 弹框打开时自动发送启动命令（如 `AT+MCULED=1`），点击 PASS/FAIL 时自动发送停止命令（如 `AT+MCULED=0`）。取消则恢复待执行状态。
 
-**按键测试弹框**：
+**按键测试弹框**（详见 8.3.9 UI 交互设计）：
 
 ```
-┌─ 按键测试 ─────────────────────────────────┐
-│                                             │
-│   ┌─────┐  ┌─────┐  ┌─────┐  ┌────────┐   │
-│   │ PTT │  │VOL+ │  │VOL- │  │ POWER  │   │
-│   │  ●  │  │  ●  │  │  ○  │  │   ○    │   │
-│   └─────┘  └─────┘  └─────┘  └────────┘   │
-│                                             │
-│   ● 已检测(绿)  ○ 未检测(灰)               │
-│   进度: 2/4                                 │
-│                                             │
-│         [  PASS  ]    [  FAIL  ]            │
-│                  [停止]                      │
-└─────────────────────────────────────────────┘
+┌─ 按键测试 ──────────────────────────────────────────┐
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────┐     │
+│  │  ◉       │  │  ✓       │  │  ○             │     │
+│  │ 按住中.. │  │          │  │                │     │
+│  │ 多功能键 │  │  音量+   │  │  音量-/关机键   │     │
+│  │ 2.3s     │  │          │  │                │     │
+│  └──────────┘  └──────────┘  └────────────────┘     │
+│    蓝色脉冲       绿色          灰色                  │
+│                                                      │
+│  进度: 1/3 通过    剩余: 24s                         │
+│                                                      │
+│         [  PASS  ]    [  FAIL  ]                     │
+│                  [停止]                               │
+└──────────────────────────────────────────────────────┘
 ```
 
-异步事件 `+MCUKEY:KEY=PTT,STATE=PRESS` 到达时对应按键变绿。全部检测完自动 PASS。超时未全部完成则 FAIL。操作员也可随时手动判定 PASS/FAIL。
+四种按键状态：○ 未检测（灰）、◉ 按住中（蓝色脉冲）、✓ 已通过（绿）、✗ 卡住（红）。按键列表和标签从产品配置文件加载。
 
 **三态日志面板**：
 
@@ -461,7 +463,7 @@ WAIT_RESPONSE
 | MDSIG (信号质量) | csq_min, rssi_min, rsrp_min | CSQ 0-31 阈值、RSSI dBm 阈值、RSRP 阈值 |
 | MDALL (综合测试) | ping_enabled, ping_host, ping_count | 是否测试 Ping、Ping 地址、次数 |
 | MCUVBAT (电池电压) | mv_min, mv_max | 电压合格范围 (mV) |
-| MCUKEY (按键测试) | keys, timeout_s | 待测按键列表、超时秒数 |
+| MCUKEY (按键测试) | timeout_s, key_timeout_s | 总超时、单键 STUCK 超时（按键列表从产品配置文件加载） |
 
 可通过"恢复默认"将所有测试项配置重置为系统默认值。
 
@@ -671,9 +673,364 @@ let csq_ok = if csq >= 0 { csq >= csq_min } else { csq >= rssi_min };
   "MDSIG": { "csq_min": 10, "rssi_min": -90, "rsrp_min": -110 },
   "MDALL": { "ping_enabled": true, "ping_host": "8.8.8.8", "ping_count": 3 },
   "MCUVBAT": { "mv_min": 3000, "mv_max": 4500 },
-  "MCUKEY": { "keys": ["PTT", "VOL+", "VOL-", "POWER"], "timeout_s": 30 }
+  "MCUKEY": { "timeout_s": 30, "key_timeout_s": 10 }
 }
 ```
+
+---
+
+### 8.3 按键测试详细设计
+
+按键测试是最复杂的测试项，涉及 PC ↔ 4G 模组 ↔ MCU 三端协作、异步 URC 事件、实时 UI 反馈。本节定义完整实现方案。
+
+#### 8.3.1 三端分工
+
+| 端 | 职责 | 新产品加键时改动 |
+|----|------|-----------------|
+| **PC** | 从产品配置文件加载待测按键列表，收集 URC 事件，驱动按键状态机，判定通过/失败 | 只改配置文件 |
+| **4G 模组** | 透明桥接：转发启动/停止命令，监听 MCU `!KEY:` URC 原样转发到 PC。不解析按键名称 | 不改 |
+| **MCU** | 进入按键测试模式后抑制正常按键功能，上报 `!KEY:` 异步事件 | 改 MCU 固件 |
+
+#### 8.3.2 产品配置文件
+
+文件位置：`~/.esim-production-tool/products/<PRODUCT>.json`，应用首次运行时创建默认文件。
+
+连接设备后 `AT+CAP?` 返回 `PRODUCT=E02T`，后端加载 `products/E02T.json`。找不到则使用内置默认配置。
+
+**E02T 配置**（`products/E02T.json`）：
+
+```json
+{
+  "product": "E02T",
+  "key_test": {
+    "keys": [
+      { "name": "MULTI_FUN", "label": "多功能键", "note": "GPIO14, 侧面大按键, 短按PTT/长按其他" },
+      { "name": "VOL_UP",    "label": "音量+",    "note": "顶部左键" },
+      { "name": "VOL_DOWN",  "label": "音量-/关机键", "note": "顶部右键, 长按关机" }
+    ]
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `keys[].name` | string | 按键标识，ASCII 大写字母/数字/下划线，与 MCU URC 名称严格一致 |
+| `keys[].label` | string | 界面中文显示名 |
+| `keys[].note` | string | 物理位置备注，仅供开发参考 |
+
+操作参数（`timeout_s`、`key_timeout_s`）放在 Settings 的 MCUKEY params 中，由设置页面调整：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `timeout_s` | 30 | 总测试超时（秒） |
+| `key_timeout_s` | 10 | 单键 STUCK 超时（秒），PRESS 后无 RELEASE 判定卡住 |
+
+分离原因：`keys` 是硬件事实（产品配置），`timeout` 是操作参数（产线调优）。
+
+#### 8.3.3 后端串口架构改造
+
+当前 `send_command()` 是同步阻塞式：drain 缓冲区 → 发命令 → 读到 OK/ERROR 返回。**无法支持 URC**：两次命令之间到达的 URC 会被 drain 丢弃，空闲期没有线程在读串口。
+
+改造为「后台持续读取 + 命令/URC 分流」架构：
+
+```
+                    ┌──────────────────────────┐
+                    │  后台读取线程 (常驻)       │
+                    │  read_port = port.clone() │
+                    │                          │
+                    │  读到一行 line:           │
+                    │  ├─ +MCUKEY:KEY=xxx 开头  │
+                    │  │  → emit("key:event")  │
+                    │  │                       │
+                    │  ├─ OK / ERROR           │
+                    │  │  → response_tx.send() │
+                    │  │  (通知 send_command)   │
+                    │  │                       │
+                    │  └─ 其他 +CMD:xxx        │
+                    │     → response_tx.send() │
+                    │     (作为命令响应行)       │
+                    │                          │
+                    │  所有行 → emit serial:data│
+                    └──────────────────────────┘
+                              ▲
+    send_command():           │
+    1. drain response_rx      │
+    2. write cmd              │
+    3. loop recv response_rx  ─┘
+       OK → success, break
+       ERROR → fail, break
+       其他 → 累积到 lines
+    4. return ATResponse
+```
+
+实现要点：
+
+- `port.try_clone()` 获取独立读句柄，主线程保留写句柄
+- 读线程设 100ms read timeout + stop flag，disconnect 时设 flag 退出
+- 使用 `mpsc::channel` 传递响应行，`send_command` 带超时 recv
+- URC 识别规则：行以 `+MCUKEY:KEY=` 开头即为按键 URC，无需后端维护 `key_test_active` 标志。前端 listener 只在按键测试期间注册，非测试期间的 URC 无人监听自动忽略
+- 所有行都 emit `serial:data` 事件（调试页面使用）
+
+**URC 与命令响应的区分**（无歧义）：
+
+| 行内容 | 判定 |
+|--------|------|
+| `+MCUKEY:KEY=MULTI_FUN,STATE=PRESS` | URC（含 `KEY=`） |
+| `+MCUKEY:OK` | 命令响应（启动/停止命令的应答） |
+| `+MCUKEY:ERR,TIMEOUT` | 命令响应（错误） |
+| `+MCUMAC:MAC=AA:BB:CC:DD:EE:FF` | 命令响应（其他命令） |
+
+即使 URC 夹在其他命令的响应中间，`KEY=` 前缀也能可靠区分：
+
+```
++MCUKEY:KEY=VOL_UP,STATE=PRESS    ← URC, emit event
++MCUMAC:MAC=AA:BB:CC:DD:EE:FF    ← response line
+OK                                 ← response terminator
+```
+
+#### 8.3.4 按键状态机
+
+每个按键独立维护状态：
+
+```typescript
+type KeyState = 'untested' | 'pressed' | 'passed' | 'stuck'
+```
+
+状态转换：
+
+```
+UNTESTED (灰色 ○)
+   │ 收到 STATE=PRESS
+   ▼
+PRESSED (蓝色 ◉, 脉冲动画)
+   │
+   ├─ 收到 STATE=RELEASE ──→ PASSED (绿色 ✓) ← 终态
+   │
+   └─ key_timeout_s 无 RELEASE ──→ STUCK (红色 ✗) ← 终态
+```
+
+事件处理规则：
+
+| 当前状态 | 收到 PRESS | 收到 RELEASE |
+|---------|-----------|-------------|
+| untested | → pressed, 记录 pressedAt | 忽略, 日志 warn |
+| pressed | 重置 pressedAt（消抖容错） | → passed |
+| passed | 忽略 | 忽略 |
+| stuck | 忽略 | 忽略 |
+
+收到配置中不存在的按键名称时忽略该事件，日志提示 "收到未配置的按键: xxx"。
+
+#### 8.3.5 自动结束条件
+
+测试结束判定（每 500ms 轮询检查）：
+
+| 条件 | 结果 |
+|------|------|
+| 所有按键状态 = passed | **PASS** |
+| 所有按键到达终态（passed 或 stuck），且有 stuck | **FAIL**（原因：xxx 卡住） |
+| 总时间 > timeout_s | **FAIL**（原因：超时，未通过 xxx） |
+
+关键：「所有键到达终态」包含 stuck。一个键 stuck + 其他键 passed 不需要等到总超时。
+
+#### 8.3.6 统一出口 finishKeyTest
+
+所有退出路径走同一个函数，用 `keyTestActive` 做一次性门控防止竞态：
+
+```typescript
+async function finishKeyTest(passed: boolean, reason: string) {
+  if (!keyTestActive.value) return   // 防重入：已经结束过了
+  keyTestActive.value = false
+
+  // 1. 停止监听（先于发命令，避免残留事件干扰）
+  if (keyTestUnlisten) { keyTestUnlisten(); keyTestUnlisten = null }
+  clearStuckTimer()
+
+  // 2. 发送停止命令（best-effort，失败不阻塞）
+  try { await invoke('send_at_command', { cmd: 'AT+MCUKEY=0', timeoutMs: 3000 }) }
+  catch { /* MCU 60s 后自动退出 */ }
+
+  // 3. 构建结果
+  const durationMs = Date.now() - keyTestStartTime
+  const parsedData: Record<string, string> = {}
+  for (const k of keyInfos.value) parsedData[k.name] = k.state
+  const rawResponse = keyInfos.value.map(k => `${k.name}:${k.state}`).join(' ')
+
+  // 4. 更新测试项状态
+  updateItem('MCUKEY', {
+    status: passed ? 'pass' : 'fail',
+    durationMs, parsedData, rawResponse,
+    error: reason
+  })
+
+  // 5. 日志
+  addLog(passed ? 'success' : 'error', `[按键测试] ${passed ? 'PASS' : 'FAIL: ' + reason} (${(durationMs / 1000).toFixed(1)}s)`)
+
+  // 6. 关闭弹框
+  showKeyTest.value = false
+}
+```
+
+所有触发点：
+
+| 触发 | 调用 |
+|------|------|
+| 全部按键 PASSED | `finishKeyTest(true, '')` |
+| 全部到达终态，有 STUCK | `finishKeyTest(false, 'VOL_DOWN 卡住')` |
+| 总超时 | `finishKeyTest(false, '超时，未通过: VOL_UP')` |
+| 用户点 PASS | `finishKeyTest(true, '')` |
+| 用户点 FAIL | `finishKeyTest(false, '人工判定')` |
+| 用户点 停止 | `finishKeyTest(false, '手动停止')` |
+| USB 断线 | `finishKeyTest(false, 'USB 断线')` |
+
+防重入保证：无论哪两条路径同时触发，`if (!keyTestActive.value) return` 确保只有第一个执行。
+
+#### 8.3.7 完整流程
+
+```
+用户点击 [测试] 按钮
+  │
+  ▼
+① 检查 keyTestActive / running → 若 busy 则 return
+② 检查产测模式 → 未进入则先 AT+PROD=1
+  │
+  ▼
+③ await runSingleTest('MCUKEY')  // 发送 AT+MCUKEY=1，等待 OK
+   │
+   ├── 失败 → item 标记 fail，不打开弹框，return
+   │
+   ▼ 成功（status = manual_pending）
+④ 初始化 keyInfos（从产品配置文件加载 name/label）
+   所有按键 state = untested
+   keyTestStartTime = Date.now()
+   showKeyTest = true（打开弹框）
+  │
+  ▼
+⑤ 注册 URC 事件 listener
+   启动 STUCK 检测定时器（500ms 间隔）
+   启动轮询循环
+  │
+  ▼
+⑥ 轮询循环（while keyTestActive && 未超时）
+   │
+   ├── 遍历 pressed 的键: now - pressedAt > key_timeout_s → 标记 STUCK
+   │
+   ├── 所有键到达终态?
+   │   ├── 全部 passed → finishKeyTest(true, '')
+   │   └── 有 stuck → finishKeyTest(false, reason)
+   │
+   ├── 总超时 → finishKeyTest(false, reason)
+   │
+   └── sleep 500ms → 继续循环
+  │
+  ▼ （轮询退出：keyTestActive=false 或 finishKeyTest 已调用）
+```
+
+#### 8.3.8 退出产测自动清理
+
+`exitProductionMode()` 执行前检查按键测试状态：
+
+```
+if (keyTestActive) {
+  finishKeyTest(false, '退出产测')   // 会发 AT+MCUKEY=0
+}
+await invoke('exit_production_mode')  // AT+PROD=0
+```
+
+4G 模组侧也有保护：处理 `AT+PROD=0` 时若按键测试仍激活，自动发 `AT+KEY=0` 给 MCU。双重保障。
+
+USB 断线时 `handleDisconnect()` 中：
+
+```
+if (keyTestActive) {
+  stopKeyTest()   // 清理 listener/timer，不发停止命令（串口已断）
+}
+resetAll()
+```
+
+#### 8.3.9 UI 交互设计
+
+**弹框布局**（`mask-closable=false`, `closable=false`）：
+
+```
+┌─ 按键测试 ──────────────────────────────────────────┐
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────┐     │
+│  │  ◉       │  │  ✓       │  │  ○             │     │
+│  │ 按住中.. │  │          │  │                │     │
+│  │ 多功能键 │  │  音量+   │  │  音量-/关机键   │     │
+│  │ 2.3s     │  │          │  │                │     │
+│  └──────────┘  └──────────┘  └────────────────┘     │
+│    蓝色脉冲       绿色          灰色                  │
+│                                                      │
+│  进度: 1/3 通过    剩余: 24s                         │
+│                                                      │
+│         [  PASS  ]    [  FAIL  ]                     │
+│                  [停止]                               │
+└──────────────────────────────────────────────────────┘
+```
+
+**按键卡片视觉**：
+
+| 状态 | 图标 | 边框 | 背景 | 卡片文字 |
+|------|------|------|------|---------|
+| untested | ○ | #ddd | #fff | label |
+| pressed | ◉ | #2080f0 + 呼吸动画 | #f0f7ff | label + "按住中..." + `${秒数}s` |
+| passed | ✓ | #18a058 | #f0fdf4 | label |
+| stuck | ✗ | #d03050 | #fef0f0 | label + "卡住" |
+
+呼吸动画和持续秒数显示由 `setInterval(100ms)` 驱动的响应式 `now` 变量实现。弹框关闭时清除定时器。
+
+**进度指示**："进度: 1/3 通过" — 只计 passed 数量 / 总数。"剩余: 24s" — `timeout_s - elapsed` 向下取整。
+
+#### 8.3.10 互斥保护
+
+按键测试期间禁止所有其他串口操作：
+
+```typescript
+// ProductionView.vue
+const busy = computed(() => production.running || production.keyTestActive)
+// 所有测试按钮、一键产测按钮 :disabled="busy"
+
+// ConfigView.vue - ensureProductionMode()
+if (production.keyTestActive) {
+  message.warning('按键测试进行中，请先完成')
+  return false
+}
+```
+
+#### 8.3.11 报告数据
+
+按键测试结果写入报告 items 时，包含每个按键的最终状态：
+
+```json
+{
+  "id": "MCUKEY",
+  "name": "按键测试",
+  "domain": "mcu",
+  "status": "fail",
+  "data": {
+    "MULTI_FUN": "passed",
+    "VOL_UP": "passed",
+    "VOL_DOWN": "stuck"
+  },
+  "raw": "MULTI_FUN:passed VOL_UP:passed VOL_DOWN:stuck",
+  "duration_ms": 15230
+}
+```
+
+#### 8.3.12 异常场景处理
+
+| 场景 | 处理 |
+|------|------|
+| AT+MCUKEY=1 失败（MCU 未连接） | item 标记 fail，不打开弹框 |
+| AT+MCUKEY=0 超时 | 忽略，MCU 60 秒后自动退出 |
+| URC 始终不到达（4G 桥接未实现） | 总超时后 FAIL，所有键 untested |
+| 按键 PRESS 后永不 RELEASE | key_timeout_s 后标记 STUCK |
+| USB 断线 | 清理 listener/timer，不发停止命令 |
+| 用户重复点测试 | 每次 openKeyTest 重新初始化状态，全新测试 |
+| 按键测试期间切到配置页操作 | 配置操作入口检查 keyTestActive，拒绝并提示 |
 
 ---
 
@@ -735,7 +1092,7 @@ AT+CFGSTART → AT+CFGSAVE（不发任何 CFGSET）
     "manual_test_items": ["MCULED", "MCUFBMIC", "MCUPMIC", "MCUKEY"],
     "final_items": ["MCUGAUGE", "MCUTIME"],
     "dangerous_items": ["MCURST"],
-    "key_list": ["PTT", "VOL+", "VOL-", "POWER"],
+    "key_list": ["MULTI_FUN", "VOL_UP", "VOL_DOWN"],
     "thresholds": {
       "csq_min": 10,
       "rsrp_min": -110,
@@ -780,6 +1137,9 @@ AT+CFGSTART → AT+CFGSAVE（不发任何 CFGSET）
 ```
 ~/.esim-production-tool/
 ├── config.json              # 工具全局配置
+├── products/
+│   ├── E02T.json            # E02T 产品配置（按键列表等硬件定义）
+│   └── E03T.json            # E03T 产品配置
 ├── profiles/
 │   ├── E02T.json            # E02T 产品 Profile
 │   └── 4GCAM.json           # 4GCAM 产品 Profile

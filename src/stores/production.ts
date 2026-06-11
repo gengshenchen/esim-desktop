@@ -47,6 +47,7 @@ const ALL_MODEM_ITEMS: Omit<TestItem, 'status' | 'rawResponse' | 'parsedData' | 
   { id: 'MDSIG', name: '信号质量', domain: 'modem', judgeType: 'auto' },
   { id: 'MDDATA', name: '数据业务', domain: 'modem', judgeType: 'auto' },
   { id: 'MDALL', name: '综合测试', domain: 'modem', judgeType: 'auto' },
+  { id: 'MDPING', name: 'Ping 测试', domain: 'modem', judgeType: 'auto' },
 ]
 
 const ALL_MCU_ITEMS: Omit<TestItem, 'status' | 'rawResponse' | 'parsedData' | 'error' | 'durationMs'>[] = [
@@ -196,7 +197,10 @@ export const useProductionStore = defineStore('production', () => {
 
     if (rstItem && rstItem.status === 'pending') {
       savePending = true
-      runFactoryReset().finally(() => { savePending = false })
+      runFactoryReset().finally(() => {
+        savePending = false
+        checkAutoSaveReport()
+      })
       return
     }
 

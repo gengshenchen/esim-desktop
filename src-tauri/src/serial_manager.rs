@@ -1,38 +1,114 @@
 use crate::error::AppError;
-use crate::types::{ATResponse, SerialDataEvent};
+use crate::types::{ATResponse, KeyEvent, SerialDataEvent};
 use serialport::SerialPort;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-fn emit_event(handle: &Option<AppHandle>, line: &str, direction: &str) {
-    if let Some(ref h) = handle {
-        let _ = h.emit(
-            "serial:data",
-            SerialDataEvent {
-                line: line.to_string(),
-                direction: direction.to_string(),
-            },
-        );
+fn emit_serial_data(handle: &AppHandle, line: &str, direction: &str) {
+    let _ = handle.emit(
+        "serial:data",
+        SerialDataEvent {
+            line: line.to_string(),
+            direction: direction.to_string(),
+        },
+    );
+}
+
+fn parse_key_urc(line: &str) -> Option<KeyEvent> {
+    // +MCUKEY:KEY=MULTI_FUN,STATE=PRESS
+    let data = line.strip_prefix("+MCUKEY:")?;
+    let mut key = String::new();
+    let mut state = String::new();
+    for part in data.split(',') {
+        if let Some(v) = part.strip_prefix("KEY=") {
+            key = v.to_string();
+        } else if let Some(v) = part.strip_prefix("STATE=") {
+            state = v.to_string();
+        }
+    }
+    if key.is_empty() || state.is_empty() {
+        return None;
+    }
+    Some(KeyEvent { key, state })
+}
+
+fn is_key_urc(line: &str) -> bool {
+    line.starts_with("+MCUKEY:KEY=")
+}
+
+fn reader_thread(
+    mut read_port: Box<dyn SerialPort>,
+    response_tx: Sender<String>,
+    app_handle: AppHandle,
+    stop_flag: Arc<AtomicBool>,
+) {
+    let mut buffer = Vec::with_capacity(4096);
+    let mut read_buf = [0u8; 1024];
+
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        match read_port.read(&mut read_buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                buffer.extend_from_slice(&read_buf[..n]);
+
+                while let Some(pos) = buffer.windows(2).position(|w| w == b"\r\n") {
+                    let line = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                    buffer.drain(..pos + 2);
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    emit_serial_data(&app_handle, &line, "rx");
+
+                    if is_key_urc(&line) {
+                        if let Some(kv) = parse_key_urc(&line) {
+                            let _ = app_handle.emit("key:event", &kv);
+                        }
+                    } else {
+                        let _ = response_tx.send(line);
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                continue;
+            }
+            Err(_) => {
+                if !stop_flag.load(Ordering::Relaxed) {
+                    let _ = app_handle.emit("serial:disconnected", ());
+                }
+                break;
+            }
+        }
     }
 }
 
 pub struct SerialManager {
-    port: Option<Box<dyn SerialPort>>,
+    write_port: Option<Box<dyn SerialPort>>,
+    response_rx: Option<Receiver<String>>,
     app_handle: Option<AppHandle>,
     connected_port: Option<String>,
-    monitor_running: Arc<AtomicBool>,
+    reader_stop: Arc<AtomicBool>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SerialManager {
     pub fn new() -> Self {
         Self {
-            port: None,
+            write_port: None,
+            response_rx: None,
             app_handle: None,
             connected_port: None,
-            monitor_running: Arc::new(AtomicBool::new(false)),
+            reader_stop: Arc::new(AtomicBool::new(false)),
+            reader_thread: None,
         }
     }
 
@@ -62,37 +138,63 @@ impl SerialManager {
             .flow_control(serialport::FlowControl::None)
             .open()?;
 
-        self.port = Some(port);
+        let read_port = port
+            .try_clone()
+            .map_err(|e| AppError::Serial(format!("try_clone failed: {}", e)))?;
+
+        self.write_port = Some(port);
         self.connected_port = Some(port_name.to_string());
+
+        let (response_tx, response_rx) = mpsc::channel();
+        self.response_rx = Some(response_rx);
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        self.reader_stop = stop_flag.clone();
+
+        let app_handle = self
+            .app_handle
+            .clone()
+            .ok_or(AppError::Serial("app_handle not set".to_string()))?;
+
+        let handle = std::thread::spawn(move || {
+            reader_thread(read_port, response_tx, app_handle, stop_flag);
+        });
+        self.reader_thread = Some(handle);
+
         Ok(())
     }
 
     pub fn disconnect(&mut self) {
-        self.monitor_running.store(false, Ordering::Relaxed);
-        self.port = None;
+        self.reader_stop.store(true, Ordering::Relaxed);
+
+        // Drop write port first to unblock reader if it's stuck on read
+        self.write_port = None;
+        self.response_rx = None;
+
+        if let Some(handle) = self.reader_thread.take() {
+            let _ = handle.join();
+        }
+
         self.connected_port = None;
+        self.reader_stop = Arc::new(AtomicBool::new(false));
     }
 
     pub fn is_connected(&self) -> bool {
-        self.port.is_some()
+        self.write_port.is_some()
     }
 
     pub fn connected_port_name(&self) -> Option<String> {
         self.connected_port.clone()
     }
 
-    pub fn monitor_flag(&self) -> Arc<AtomicBool> {
-        self.monitor_running.clone()
-    }
-
-    pub fn start_monitor(&mut self) {
-        self.monitor_running.store(true, Ordering::Relaxed);
-    }
-
     pub fn force_disconnect(&mut self) {
-        self.port = None;
+        self.reader_stop.store(true, Ordering::Relaxed);
+        self.write_port = None;
+        self.response_rx = None;
         self.connected_port = None;
-        self.monitor_running.store(false, Ordering::Relaxed);
+        // Don't join reader thread here — called from disconnect event handler
+        self.reader_thread = None;
+        self.reader_stop = Arc::new(AtomicBool::new(false));
     }
 
     pub fn send_command(
@@ -100,12 +202,18 @@ impl SerialManager {
         cmd: &str,
         timeout_ms: u64,
     ) -> Result<ATResponse, AppError> {
-        let handle = self.app_handle.clone();
-
-        let port = self
-            .port
+        let write_port = self
+            .write_port
             .as_mut()
             .ok_or(AppError::NotConnected)?;
+
+        let response_rx = self
+            .response_rx
+            .as_ref()
+            .ok_or(AppError::NotConnected)?;
+
+        // Drain any leftover lines from previous command
+        while response_rx.try_recv().is_ok() {}
 
         let cmd_with_crlf = if cmd.ends_with("\r\n") {
             cmd.to_string()
@@ -113,64 +221,43 @@ impl SerialManager {
             format!("{}\r\n", cmd)
         };
 
-        let mut drain_buf = [0u8; 1024];
-        loop {
-            match port.read(&mut drain_buf) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(_) => break,
-            }
+        if let Some(ref h) = self.app_handle {
+            emit_serial_data(h, cmd, "tx");
         }
 
-        emit_event(&handle, cmd, "tx");
-
-        port.write_all(cmd_with_crlf.as_bytes())
+        write_port
+            .write_all(cmd_with_crlf.as_bytes())
             .map_err(|e| AppError::Serial(e.to_string()))?;
-        port.flush()
+        write_port
+            .flush()
             .map_err(|e| AppError::Serial(e.to_string()))?;
 
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
-        let mut buffer = Vec::new();
-        let mut read_buf = [0u8; 1024];
         let mut lines: Vec<String> = Vec::new();
         let mut success = false;
         let mut finished = false;
 
         while start.elapsed() < timeout && !finished {
-            match port.read(&mut read_buf) {
-                Ok(n) if n > 0 => {
-                    buffer.extend_from_slice(&read_buf[..n]);
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let recv_timeout = remaining.min(Duration::from_millis(100));
 
-                    while let Some(pos) = buffer
-                        .windows(2)
-                        .position(|w| w == b"\r\n")
-                    {
-                        let line = String::from_utf8_lossy(&buffer[..pos]).to_string();
-                        buffer.drain(..pos + 2);
-
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        emit_event(&handle, &line, "rx");
-
-                        if line == "OK" {
-                            success = true;
-                            finished = true;
-                            break;
-                        } else if line == "ERROR" {
-                            success = false;
-                            finished = true;
-                            break;
-                        } else {
-                            lines.push(line);
-                        }
+            match response_rx.recv_timeout(recv_timeout) {
+                Ok(line) => {
+                    if line == "OK" {
+                        success = true;
+                        finished = true;
+                    } else if line == "ERROR" {
+                        success = false;
+                        finished = true;
+                    } else {
+                        lines.push(line);
                     }
                 }
-                Ok(_) => {}
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-                Err(e) => return Err(AppError::Serial(e.to_string())),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(AppError::Serial("串口读取线程已断开".to_string()));
+                }
             }
         }
 
@@ -182,15 +269,13 @@ impl SerialManager {
         }
 
         let error_code = if !success {
-            lines
-                .last()
-                .and_then(|l| {
-                    if let Some(pos) = l.find("ERR,") {
-                        Some(l[pos + 4..].to_string())
-                    } else {
-                        None
-                    }
-                })
+            lines.last().and_then(|l| {
+                if let Some(pos) = l.find("ERR,") {
+                    Some(l[pos + 4..].to_string())
+                } else {
+                    None
+                }
+            })
         } else {
             None
         };
@@ -207,43 +292,4 @@ pub type SharedSerialManager = Arc<Mutex<SerialManager>>;
 
 pub fn create_serial_manager() -> SharedSerialManager {
     Arc::new(Mutex::new(SerialManager::new()))
-}
-
-pub fn start_port_monitor(serial: SharedSerialManager, app_handle: AppHandle) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-
-            let (port_name, monitor_active) = {
-                let mgr = serial.lock().unwrap();
-                let name = mgr.connected_port_name();
-                let active = mgr.monitor_flag().load(Ordering::Relaxed);
-                (name, active)
-            };
-
-            if !monitor_active {
-                continue;
-            }
-
-            let port_name = match port_name {
-                Some(name) => name,
-                None => continue,
-            };
-
-            let ports = match serialport::available_ports() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let still_exists = ports.iter().any(|p| p.port_name == port_name);
-
-            if !still_exists {
-                {
-                    let mut mgr = serial.lock().unwrap();
-                    mgr.force_disconnect();
-                }
-                let _ = app_handle.emit("serial:disconnected", ());
-            }
-        }
-    });
 }

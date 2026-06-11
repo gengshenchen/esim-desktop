@@ -120,11 +120,17 @@ pub struct TestItemConfig {
     pub params: HashMap<String, serde_json::Value>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub operator: String,
     pub baud_rate: u32,
     pub data_dir: String,
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
     pub test_items: Vec<TestItemConfig>,
 }
 
@@ -134,6 +140,7 @@ impl Default for AppSettings {
             operator: String::new(),
             baud_rate: 115200,
             data_dir: String::new(),
+            auto_reconnect: true,
             test_items: default_test_items(),
         }
     }
@@ -159,7 +166,11 @@ pub fn default_test_items() -> Vec<TestItemConfig> {
         },
         TestItemConfig {
             id: "MDALL".into(), enabled: true, retries: 1, timeout_ms: 30000,
-            params: [("ping_enabled".into(), serde_json::json!(true)), ("ping_host".into(), serde_json::json!("8.8.8.8")), ("ping_count".into(), serde_json::json!(3))].into(),
+            params: HashMap::new(),
+        },
+        TestItemConfig {
+            id: "MDPING".into(), enabled: true, retries: 1, timeout_ms: 20000,
+            params: [("ping_host".into(), serde_json::json!("8.8.8.8")), ("ping_count".into(), serde_json::json!(3))].into(),
         },
         TestItemConfig {
             id: "MCUBVER".into(), enabled: true, retries: 1, timeout_ms: 5000,
@@ -191,7 +202,7 @@ pub fn default_test_items() -> Vec<TestItemConfig> {
         },
         TestItemConfig {
             id: "MCUKEY".into(), enabled: true, retries: 0, timeout_ms: 5000,
-            params: [("keys".into(), serde_json::json!(["PTT", "VOL+", "VOL-", "POWER"])), ("timeout_s".into(), serde_json::json!(30))].into(),
+            params: [("timeout_s".into(), serde_json::json!(30)), ("key_timeout_s".into(), serde_json::json!(10))].into(),
         },
         TestItemConfig {
             id: "MCUGAUGE".into(), enabled: true, retries: 1, timeout_ms: 8000,

@@ -95,7 +95,7 @@ pub fn get_at_command(test_id: &str) -> &'static str {
         "MCULED" => "AT+MCULED=1",
         "MCUFBMIC" => "AT+MCUFBMIC=1",
         "MCUPMIC" => "AT+MCUPMIC=1",
-        "MCUKEY" => "AT+MCUKEY",
+        "MCUKEY" => "AT+MCUKEY=1",
         "MCUGAUGE" => "AT+MCUGAUGE",
         "MCURST" => "AT+MCURST",
         _ => "",
@@ -172,9 +172,9 @@ pub fn judge_test(
         }
         "MDALL" => {
             let data = resp.lines.first().map(|l| parse_kv_response(l)).unwrap_or_default();
-            let ping_enabled = params.get("ping_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            // PING/DNS 子项始终忽略，由独立的 MDPING 测试项负责
             let all_ok = data.iter().all(|(k, v)| {
-                if !ping_enabled && (k == "PING" || k == "DNS") {
+                if k == "PING" || k == "DNS" {
                     return true;
                 }
                 v == "OK"
@@ -185,7 +185,7 @@ pub fn judge_test(
                 let failures: Vec<String> = data
                     .iter()
                     .filter(|(k, v)| {
-                        if !ping_enabled && (k.as_str() == "PING" || k.as_str() == "DNS") {
+                        if k.as_str() == "PING" || k.as_str() == "DNS" {
                             return false;
                         }
                         v.as_str() != "OK"
@@ -213,6 +213,16 @@ pub fn judge_test(
                 ("pass".to_string(), String::new())
             } else {
                 ("fail".to_string(), format!("MAC格式无效: {}", mac))
+            }
+        }
+        "MDPING" => {
+            let data = resp.lines.first().map(|l| parse_kv_response(l)).unwrap_or_default();
+            let sent: i32 = data.get("SENT").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let rcv: i32 = data.get("RCV").and_then(|v| v.parse().ok()).unwrap_or(0);
+            if sent > 0 && rcv > 0 {
+                ("pass".to_string(), String::new())
+            } else {
+                ("fail".to_string(), format!("SENT={},RCV={}", sent, rcv))
             }
         }
         "MCULED" | "MCUFBMIC" | "MCUPMIC" => {

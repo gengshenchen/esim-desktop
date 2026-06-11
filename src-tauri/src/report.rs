@@ -162,7 +162,7 @@ pub fn delete_report(report_id: &str) -> Result<(), String> {
     Err(format!("报告 {} 不存在", report_id))
 }
 
-pub fn export_csv(filter: &ReportFilter) -> Result<String, String> {
+pub fn export_csv(filter: &ReportFilter, path: Option<&str>) -> Result<String, String> {
     let reports = list_reports(filter)?;
     let mut csv = String::from("序号,时间,IMEI,产品,操作员,结果,通过,失败,总计\n");
 
@@ -181,7 +181,14 @@ pub fn export_csv(filter: &ReportFilter) -> Result<String, String> {
         ));
     }
 
-    let export_path = data_dir().join("reports_export.csv");
+    let export_path = match path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => data_dir().join("reports_export.csv"),
+    };
+
+    if let Some(parent) = export_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     fs::write(&export_path, &csv).map_err(|e| format!("导出失败: {}", e))?;
 
     Ok(export_path.to_string_lossy().to_string())
@@ -189,4 +196,19 @@ pub fn export_csv(filter: &ReportFilter) -> Result<String, String> {
 
 pub fn get_data_dir() -> String {
     data_dir().to_string_lossy().to_string()
+}
+
+pub fn get_report_path(report_id: &str) -> Result<String, String> {
+    let base = reports_dir();
+    let day_dirs = fs::read_dir(&base).map_err(|e| e.to_string())?;
+    for entry in day_dirs.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let path = entry.path().join(format!("{}.json", report_id));
+        if path.exists() {
+            return Ok(path.to_string_lossy().to_string());
+        }
+    }
+    Err(format!("报告 {} 不存在", report_id))
 }

@@ -5,6 +5,9 @@ import {
   NModal, NDescriptions, NDescriptionsItem, NDivider,
   useMessage, useDialog,
 } from 'naive-ui'
+import { save } from '@tauri-apps/plugin-dialog'
+import { open as shellOpen } from '@tauri-apps/plugin-shell'
+import { invoke } from '@tauri-apps/api/core'
 import { useReportStore } from '@/stores/report'
 import type { TestReport, ReportSummary } from '@/stores/report'
 
@@ -75,6 +78,14 @@ function confirmDelete(r: ReportSummary) {
 
 async function handleExport() {
   try {
+    const dataDir = await invoke<string>('cmd_get_data_dir')
+    const defaultName = `reports_export_${new Date().toISOString().slice(0, 10)}.csv`
+    const filePath = await save({
+      defaultPath: `${dataDir}/reports/${defaultName}`,
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    })
+    if (!filePath) return
+
     const filter: Record<string, string | null> = {
       search: searchText.value || null,
       result: filterResult.value || null,
@@ -85,10 +96,30 @@ async function handleExport() {
       filter.date_from = new Date(filterDateRange.value[0]).toISOString().slice(0, 10)
       filter.date_to = new Date(filterDateRange.value[1]).toISOString().slice(0, 10)
     }
-    const path = await reportStore.exportCsv(filter)
-    message.success(`已导出到: ${path}`)
+    const savedPath = await reportStore.exportCsv(filter, filePath)
+    message.success(`已导出: ${savedPath}`)
+    openFolder(savedPath)
   } catch (e) {
     message.error(`导出失败: ${e}`)
+  }
+}
+
+async function openFolder(filePath: string) {
+  try {
+    const dir = filePath.replace(/[/\\][^/\\]*$/, '')
+    await shellOpen(dir)
+  } catch {
+    // ignore
+  }
+}
+
+async function openReportFile() {
+  if (!detailReport.value) return
+  try {
+    const filePath = await reportStore.getReportPath(detailReport.value.id)
+    openFolder(filePath)
+  } catch (e) {
+    message.error(`打开失败: ${e}`)
   }
 }
 
@@ -261,6 +292,12 @@ onMounted(() => {
             </tr>
           </tbody>
         </table>
+
+        <div style="margin-top: 16px; text-align: right;">
+          <NButton size="small" quaternary @click="openReportFile">
+            打开文件位置
+          </NButton>
+        </div>
       </template>
     </NModal>
   </div>

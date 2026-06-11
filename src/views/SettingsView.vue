@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import {
   NCard, NSpace, NButton, NInput, NInputNumber, NForm, NFormItem,
-  NTag, NText, NSwitch, NCollapse, NCollapseItem, NDynamicTags,
+  NTag, NText, NSwitch, NCollapse, NCollapseItem,
   useMessage,
 } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { useProductionStore } from '@/stores/production'
+import { useDeviceStore } from '@/stores/device'
 
 const message = useMessage()
 const production = useProductionStore()
+const device = useDeviceStore()
 
 interface TestItemConfig {
   id: string
@@ -23,6 +25,7 @@ interface AppSettings {
   operator: string
   baud_rate: number
   data_dir: string
+  auto_reconnect: boolean
   test_items: TestItemConfig[]
 }
 
@@ -32,6 +35,7 @@ const TEST_ITEM_META: Record<string, { name: string; domain: string }> = {
   MDSIG: { name: '信号质量', domain: '模组' },
   MDDATA: { name: '数据业务', domain: '模组' },
   MDALL: { name: '综合测试', domain: '模组' },
+  MDPING: { name: 'Ping 测试', domain: '模组' },
   MCUBVER: { name: '蓝牙版本', domain: 'MCU' },
   MCUMAC: { name: '蓝牙 MAC', domain: 'MCU' },
   MCUCHG: { name: '充电信息', domain: 'MCU' },
@@ -49,6 +53,7 @@ const settings = ref<AppSettings>({
   operator: '',
   baud_rate: 115200,
   data_dir: '',
+  auto_reconnect: true,
   test_items: [],
 })
 
@@ -75,15 +80,6 @@ function setParam(id: string, key: string, val: any) {
   cfg.params[key] = val
 }
 
-const keyTestKeys = computed({
-  get: () => {
-    const cfg = getItemConfig('MCUKEY')
-    return (cfg.params.keys as string[]) || ['PTT', 'VOL+', 'VOL-', 'POWER']
-  },
-  set: (val: string[]) => {
-    setParam('MCUKEY', 'keys', val)
-  },
-})
 
 watch(settings, () => {
   if (!loaded.value) return
@@ -94,6 +90,7 @@ watch(settings, () => {
 async function doSave() {
   try {
     await invoke('cmd_save_settings', { settingsData: settings.value })
+    device.autoReconnect = settings.value.auto_reconnect
     production.markConfigDirty()
   } catch (e: any) {
     message.error(`保存失败: ${e}`)
@@ -140,6 +137,12 @@ onMounted(() => {
         </NFormItem>
         <NFormItem label="串口波特率">
           <NInputNumber v-model:value="settings.baud_rate" :min="9600" :max="921600" :step="9600" />
+        </NFormItem>
+        <NFormItem label="自动重连">
+          <NSpace align="center">
+            <NSwitch size="small" v-model:value="settings.auto_reconnect" />
+            <NText depth="3" style="font-size: 12px;">设备拔线后自动等待重连，产线连续测试时建议开启</NText>
+          </NSpace>
         </NFormItem>
         <NFormItem label="数据目录">
           <NText depth="3" style="font-family: monospace; font-size: 12px;">{{ dataDir || settings.data_dir }}</NText>
@@ -232,27 +235,20 @@ onMounted(() => {
           </NForm>
         </NCollapseItem>
 
-        <NCollapseItem title="综合测试 (MDALL) 参数" name="MDALL">
+        <NCollapseItem title="Ping 测试 (MDPING) 参数" name="MDPING">
           <NForm label-placement="left" label-width="140" size="small">
-            <NFormItem label="Ping 测试">
-              <NSwitch
-                size="small"
-                :value="getParam('MDALL', 'ping_enabled', true)"
-                @update:value="(v: boolean) => setParam('MDALL', 'ping_enabled', v)"
-              />
-            </NFormItem>
-            <NFormItem label="Ping 目标地址">
+            <NFormItem label="目标地址">
               <NInput
                 size="small"
-                :value="getParam('MDALL', 'ping_host', '8.8.8.8')"
-                @update:value="(v: string) => setParam('MDALL', 'ping_host', v)"
+                :value="getParam('MDPING', 'ping_host', '8.8.8.8')"
+                @update:value="(v: string) => setParam('MDPING', 'ping_host', v)"
                 style="width: 200px;"
               />
             </NFormItem>
             <NFormItem label="Ping 次数">
               <NInputNumber
-                :value="getParam('MDALL', 'ping_count', 3)"
-                @update:value="(v: number | null) => setParam('MDALL', 'ping_count', v ?? 3)"
+                :value="getParam('MDPING', 'ping_count', 3)"
+                @update:value="(v: number | null) => setParam('MDPING', 'ping_count', v ?? 3)"
                 :min="1" :max="10"
               />
             </NFormItem>
@@ -280,14 +276,18 @@ onMounted(() => {
 
         <NCollapseItem title="按键测试 (MCUKEY) 参数" name="MCUKEY">
           <NForm label-placement="left" label-width="140" size="small">
-            <NFormItem label="测试按键">
-              <NDynamicTags v-model:value="keyTestKeys" />
-            </NFormItem>
-            <NFormItem label="超时 (秒)">
+            <NFormItem label="总超时 (秒)">
               <NInputNumber
                 :value="getParam('MCUKEY', 'timeout_s', 30)"
                 @update:value="(v: number | null) => setParam('MCUKEY', 'timeout_s', v ?? 30)"
                 :min="10" :max="120"
+              />
+            </NFormItem>
+            <NFormItem label="单键卡住超时 (秒)">
+              <NInputNumber
+                :value="getParam('MCUKEY', 'key_timeout_s', 10)"
+                @update:value="(v: number | null) => setParam('MCUKEY', 'key_timeout_s', v ?? 10)"
+                :min="3" :max="60"
               />
             </NFormItem>
           </NForm>
