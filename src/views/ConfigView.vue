@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import {
-  NCard, NSpace, NButton, NInput, NAlert, NRadioGroup, NRadioButton,
-  NProgress, NTag, NDivider, NSelect, NModal, useMessage, useDialog,
+  NCard, NSpace, NButton, NInput, NRadioGroup, NRadioButton,
+  NProgress, NDivider, NSelect, NModal, useMessage, useDialog,
 } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
 import { useDeviceStore } from '@/stores/device'
@@ -29,7 +29,6 @@ const readbackContent = ref('')
 const pushedContent = ref('')
 const diffMatch = ref<boolean | null>(null)
 
-// Template state
 const templates = ref<ConfigTemplate[]>([])
 const selectedTemplate = ref<string | null>(null)
 const showSaveTemplate = ref(false)
@@ -40,7 +39,6 @@ const templateOptions = computed(() =>
   templates.value.map(t => ({ label: `${t.name} — ${t.description}`, value: t.name }))
 )
 
-// Diff computation
 const diffLines = computed(() => {
   if (!pushedContent.value && !readbackContent.value) return []
   const pushed = pushedContent.value.split('\n')
@@ -239,14 +237,22 @@ loadTemplates()
 </script>
 
 <template>
-  <div>
-    <NAlert v-if="!device.connected" type="warning" style="margin-bottom: 16px;">
-      请先连接设备
-    </NAlert>
+  <div class="config-page">
+    <div v-if="!device.connected" class="empty-state">
+      <div class="empty-state__icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--tesla-pale)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+        </svg>
+      </div>
+      <div class="empty-state__title">连接设备后可管理配置</div>
+      <div class="empty-state__desc">在顶部选择串口并点击连接按钮</div>
+    </div>
 
-    <NCard title="配置管理" size="small">
-      <NSpace vertical>
-        <NSpace align="center">
+    <NCard v-else title="配置管理" size="small">
+      <div class="config-layout">
+        <!-- Source selector -->
+        <div class="source-bar">
           <NRadioGroup v-model:value="source" size="small">
             <NRadioButton value="edit">手动编辑</NRadioButton>
             <NRadioButton value="template">从模板</NRadioButton>
@@ -265,7 +271,7 @@ loadTemplates()
             <NButton size="small" @click="loadSelectedTemplate" :disabled="!selectedTemplate">
               加载
             </NButton>
-            <NButton size="small" type="error" quaternary @click="deleteSelectedTemplate" :disabled="!selectedTemplate">
+            <NButton size="small" quaternary @click="deleteSelectedTemplate" :disabled="!selectedTemplate" style="color: var(--tesla-error);">
               删除
             </NButton>
           </template>
@@ -273,105 +279,241 @@ loadTemplates()
           <NButton v-if="source === 'file'" size="small" @click="handleFileImport">
             选择文件...
           </NButton>
-        </NSpace>
+        </div>
 
+        <!-- Editor -->
         <NInput
           v-model:value="editorContent"
           type="textarea"
           :rows="12"
           placeholder="version=1&#10;server=192.168.1.100&#10;port=9000&#10;apn=cmnet&#10;volume=8"
-          style="font-family: monospace;"
+          class="config-editor"
         />
 
-        <NSpace>
-          <NButton type="primary" @click="pushToDevice" :loading="uploading" :disabled="!device.connected">
+        <!-- Action buttons -->
+        <div class="action-bar">
+          <NButton type="primary" size="small" @click="pushToDevice" :loading="uploading" :disabled="!device.connected">
             推送到设备
           </NButton>
-          <NButton @click="readFromDevice" :disabled="!device.connected">
+          <NButton size="small" @click="readFromDevice" :disabled="!device.connected">
             从设备回读
           </NButton>
-          <NButton @click="restoreDefault" :disabled="!device.connected">
+          <NButton size="small" @click="restoreDefault" :disabled="!device.connected">
             恢复默认
           </NButton>
-          <NButton @click="clearConfig" :disabled="!device.connected">
+          <NButton size="small" @click="clearConfig" :disabled="!device.connected">
             清空设备配置
           </NButton>
-          <NButton @click="showSaveTemplate = true" :disabled="!editorContent.trim()">
+          <NButton size="small" @click="showSaveTemplate = true" :disabled="!editorContent.trim()">
             另存为模板
           </NButton>
-        </NSpace>
+        </div>
 
-        <div v-if="uploading">
+        <!-- Upload progress -->
+        <div v-if="uploading" class="progress-bar">
           <NProgress
             type="line"
             :percentage="uploadTotal > 0 ? Math.round((uploadProgress / uploadTotal) * 100) : 0"
           />
-          <span style="font-size: 12px;">{{ uploadProgress }}/{{ uploadTotal }} 行</span>
+          <span class="progress-text">{{ uploadProgress }}/{{ uploadTotal }} 行</span>
         </div>
 
-        <div v-if="diffMatch !== null" style="margin-top: 8px;">
-          <NTag :type="diffMatch ? 'success' : 'error'" size="small">
+        <!-- Diff status -->
+        <div v-if="diffMatch !== null" class="diff-status">
+          <span
+            class="result-badge"
+            :class="diffMatch ? 'result-badge--pass' : 'result-badge--fail'"
+          >
             {{ diffMatch ? '回读校验: 与推送内容一致' : '回读校验: 内容不一致' }}
-          </NTag>
+          </span>
         </div>
 
         <!-- Diff view -->
-        <div v-if="diffLines.length > 0" style="margin-top: 8px;">
+        <div v-if="diffLines.length > 0" class="diff-view">
           <NDivider>对比视图（推送 vs 回读）</NDivider>
-          <div style="display: flex; gap: 1px; font-family: monospace; font-size: 12px; border: 1px solid #eee; border-radius: 4px; overflow: hidden;">
-            <div style="flex: 1; background: #fafafa;">
-              <div style="padding: 4px 8px; background: #f0f0f0; font-weight: bold; font-size: 11px;">推送内容</div>
+          <div class="diff-columns">
+            <div class="diff-col">
+              <div class="diff-col__header">推送内容</div>
               <div
                 v-for="(line, idx) in diffLines"
                 :key="'p' + idx"
-                style="padding: 2px 8px; min-height: 20px; border-bottom: 1px solid #f5f5f5;"
-                :style="{ background: line.match ? '#fff' : '#fff0f0' }"
+                class="diff-line"
+                :class="{ 'diff-line--mismatch': !line.match }"
               >
                 {{ line.pushed }}
               </div>
             </div>
-            <div style="flex: 1; background: #fafafa;">
-              <div style="padding: 4px 8px; background: #f0f0f0; font-weight: bold; font-size: 11px;">回读内容</div>
+            <div class="diff-col">
+              <div class="diff-col__header">回读内容</div>
               <div
                 v-for="(line, idx) in diffLines"
                 :key="'r' + idx"
-                style="padding: 2px 8px; min-height: 20px; border-bottom: 1px solid #f5f5f5;"
-                :style="{ background: line.match ? '#fff' : '#fff0f0' }"
+                class="diff-line"
+                :class="{ 'diff-line--mismatch': !line.match }"
               >
-                <NSpace align="center" :wrap="false">
-                  <span style="flex: 1;">{{ line.readback }}</span>
-                  <span v-if="line.match" style="color: #18a058; font-size: 11px;">&#10003;</span>
-                  <span v-else style="color: #d03050; font-size: 11px;">&#10007;</span>
-                </NSpace>
+                <span style="flex: 1;">{{ line.readback }}</span>
+                <span v-if="line.match" style="color: var(--tesla-success); font-size: 11px;">&#10003;</span>
+                <span v-else style="color: var(--tesla-error); font-size: 11px;">&#10007;</span>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Readback only (no diff) -->
-        <div v-else-if="readbackContent && !pushedContent" style="margin-top: 8px;">
+        <!-- Readback only -->
+        <div v-else-if="readbackContent && !pushedContent" style="margin-top: 12px;">
           <NDivider>回读内容</NDivider>
           <NInput
             :value="readbackContent"
             type="textarea"
             :rows="8"
             readonly
-            style="font-family: monospace;"
+            class="config-editor"
           />
         </div>
-      </NSpace>
+      </div>
     </NCard>
 
     <!-- Save template modal -->
     <NModal v-model:show="showSaveTemplate" preset="card" title="保存为模板" style="width: 400px;">
-      <NSpace vertical>
+      <NSpace vertical :size="12">
         <NInput v-model:value="newTemplateName" placeholder="模板名称" />
         <NInput v-model:value="newTemplateDesc" placeholder="模板描述（可选）" />
         <NSpace justify="end">
-          <NButton @click="showSaveTemplate = false">取消</NButton>
-          <NButton type="primary" @click="doSaveTemplate">保存</NButton>
+          <NButton size="small" @click="showSaveTemplate = false">取消</NButton>
+          <NButton size="small" type="primary" @click="doSaveTemplate">保存</NButton>
         </NSpace>
       </NSpace>
     </NModal>
   </div>
 </template>
+
+<style scoped>
+.config-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  padding: 60px 20px;
+}
+
+.empty-state__icon {
+  opacity: 0.6;
+}
+
+.empty-state__title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--tesla-graphite);
+}
+
+.empty-state__desc {
+  font-size: 13px;
+  color: var(--tesla-silver);
+}
+
+.config-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.source-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-editor {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace !important;
+  font-size: 13px !important;
+}
+.config-editor :deep(textarea) {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace !important;
+  background: var(--tesla-ash) !important;
+}
+
+.action-bar {
+  display: flex;
+  gap: 8px;
+}
+
+.progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.progress-text {
+  font-size: 12px;
+  color: var(--tesla-pewter);
+  white-space: nowrap;
+}
+
+.diff-status {
+  margin-top: 4px;
+}
+
+.result-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--tesla-radius);
+  font-size: 12px;
+  font-weight: 600;
+}
+.result-badge--pass {
+  background: rgba(24, 160, 88, 0.1);
+  color: var(--tesla-success);
+}
+.result-badge--fail {
+  background: rgba(208, 48, 80, 0.1);
+  color: var(--tesla-error);
+}
+
+.diff-view {
+  margin-top: 4px;
+}
+
+.diff-columns {
+  display: flex;
+  gap: 1px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  border: 1px solid var(--tesla-cloud);
+  border-radius: var(--tesla-radius);
+  overflow: hidden;
+}
+
+.diff-col {
+  flex: 1;
+  background: var(--tesla-ash);
+}
+
+.diff-col__header {
+  padding: 6px 12px;
+  background: var(--tesla-cloud);
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--tesla-pewter);
+}
+
+.diff-line {
+  display: flex;
+  padding: 3px 12px;
+  min-height: 22px;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+  background: var(--tesla-white);
+  align-items: center;
+}
+
+.diff-line--mismatch {
+  background: #FEF2F2;
+}
+</style>

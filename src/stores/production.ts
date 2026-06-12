@@ -246,13 +246,23 @@ export const useProductionStore = defineStore('production', () => {
     }
 
     if (device.productionMode === 'production') {
-      addLog('info', '退出产测模式 AT+PROD=0 ...')
+      let keepProd = false
       try {
-        await device.exitProductionMode()
-        addLog('success', '已退出产测模式')
-      } catch (e) {
-        device.productionMode = 'idle'
-        addLog('warn', `退出产测模式异常: ${e}`)
+        const s = await invoke<{ keep_production_mode?: boolean }>('cmd_load_settings')
+        keepProd = !!s.keep_production_mode
+      } catch { /* ignore */ }
+
+      if (keepProd) {
+        addLog('info', '保持产测模式（设置中已开启）')
+      } else {
+        addLog('info', '退出产测模式 AT+PROD=0 ...')
+        try {
+          await device.exitProductionMode()
+          addLog('success', '已退出产测模式')
+        } catch (e) {
+          device.productionMode = 'idle'
+          addLog('warn', `退出产测模式异常: ${e}`)
+        }
       }
     }
   }
@@ -632,13 +642,23 @@ export const useProductionStore = defineStore('production', () => {
       // No manual items — MCURST + exit will be triggered by checkAutoSaveReport
     } else {
       // No manual items and no MCURST — exit production and save now
-      addLog('info', '退出产测模式 AT+PROD=0 ...')
+      let keepProd = false
       try {
-        await device.exitProductionMode()
-        addLog('success', '已退出产测模式')
-      } catch (e) {
-        device.productionMode = 'idle'
-        addLog('warn', `退出产测模式异常: ${e}`)
+        const s = await invoke<{ keep_production_mode?: boolean }>('cmd_load_settings')
+        keepProd = !!s.keep_production_mode
+      } catch { /* ignore */ }
+
+      if (keepProd) {
+        addLog('info', '保持产测模式（设置中已开启）')
+      } else {
+        addLog('info', '退出产测模式 AT+PROD=0 ...')
+        try {
+          await device.exitProductionMode()
+          addLog('success', '已退出产测模式')
+        } catch (e) {
+          device.productionMode = 'idle'
+          addLog('warn', `退出产测模式异常: ${e}`)
+        }
       }
       await saveReport(passCount, failCount)
     }

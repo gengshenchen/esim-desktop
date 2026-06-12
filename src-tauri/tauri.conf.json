@@ -12,10 +12,14 @@
     "windows": [
       {
         "title": "E02T 产测工具 v1.0",
-        "width": 1100,
-        "height": 750,
+        "width": 960,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 520,
+        "center": true,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": false
       }
     ],
     "security": {

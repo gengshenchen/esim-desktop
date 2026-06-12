@@ -131,6 +131,8 @@ pub struct AppSettings {
     pub data_dir: String,
     #[serde(default = "default_true")]
     pub auto_reconnect: bool,
+    #[serde(default = "default_true")]
+    pub keep_production_mode: bool,
     pub test_items: Vec<TestItemConfig>,
 }
 
@@ -141,6 +143,7 @@ impl Default for AppSettings {
             baud_rate: 115200,
             data_dir: String::new(),
             auto_reconnect: true,
+            keep_production_mode: true,
             test_items: default_test_items(),
         }
     }
