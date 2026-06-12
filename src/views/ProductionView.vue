@@ -71,8 +71,6 @@ const mcuItemsNormal = computed(() => {
   if (rst) sorted.push(rst)
   return sorted
 })
-const rstItem = computed(() => [...production.modemItems, ...production.mcuItems].find(i => i.id === 'MCURST'))
-
 const allItems = computed(() => [...production.modemItems, ...production.mcuItems])
 const passCount = computed(() => allItems.value.filter(i => i.status === 'pass').length)
 const failCount = computed(() => allItems.value.filter(i => i.status === 'fail').length)

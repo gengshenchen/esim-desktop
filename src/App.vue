@@ -3,7 +3,6 @@ import { onMounted, onUnmounted } from 'vue'
 import { NConfigProvider, NLayout, NLayoutContent, NMessageProvider, NDialogProvider } from 'naive-ui'
 import type { GlobalThemeOverrides } from 'naive-ui'
 import { getCurrentWindow, LogicalSize, LogicalPosition, availableMonitors } from '@tauri-apps/api/window'
-import { invoke } from '@tauri-apps/api/core'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppFooter from '@/components/layout/AppFooter.vue'
 
