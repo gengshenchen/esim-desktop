@@ -1,6 +1,6 @@
 {
   "productName": "esim-production-tool",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "identifier": "com.esim.production-tool",
   "build": {
     "frontendDist": "../dist",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "E02T 产测工具 v1.0",
+        "title": "E02T 产测工具 v1.0.3",
         "width": 960,
         "height": 680,
         "minWidth": 720,
