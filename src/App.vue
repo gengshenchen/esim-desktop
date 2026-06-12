@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from 'vue'
 import { NConfigProvider, NLayout, NLayoutContent, NMessageProvider, NDialogProvider } from 'naive-ui'
 import type { GlobalThemeOverrides } from 'naive-ui'
 import { getCurrentWindow, LogicalSize, LogicalPosition, availableMonitors } from '@tauri-apps/api/window'
+import { getVersion } from '@tauri-apps/api/app'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import AppFooter from '@/components/layout/AppFooter.vue'
 
@@ -227,6 +228,11 @@ onMounted(() => {
   document.addEventListener('contextmenu', (e) => e.preventDefault())
   autoResizeWindow()
   enableDragScroll()
+  getVersion().then(v => {
+    if (v && v !== '0.0.0') {
+      getCurrentWindow().setTitle(`E02T 产测工具 v${v}`)
+    }
+  }).catch(() => {})
 })
 
 onUnmounted(() => {

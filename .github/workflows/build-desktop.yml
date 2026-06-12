@@ -53,6 +53,23 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Sync version from git tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")
+          fi
+          echo "Syncing version to $VERSION"
+          # package.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
+          # tauri.conf.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+          sed -i "s/产测工具 v[0-9.]*\"/产测工具 v$VERSION\"/" src-tauri/tauri.conf.json
+          # Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+
       - name: Build Tauri app
         run: pnpm tauri build
 
