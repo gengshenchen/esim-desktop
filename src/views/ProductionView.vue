@@ -367,13 +367,14 @@ async function openKeyTest() {
   }
 
   production.initKeyInfos()
-  await production.startKeyTestLoop()
   showKeyTest.value = true
 
   keyTestElapsed.value = 0
   keyTestElapsedTimer = setInterval(() => {
     keyTestElapsed.value++
   }, 1000)
+
+  await production.startKeyTestLoop()
 }
 
 async function stopKeyTest() {
